@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stellen-Finder</title>
+<style>
+:root{--ink:#14213d;--leise:#55617a;--rand:#d9e2ef;--blau:#cfe0f7;--blau-dunkel:#1f4e8c;--gruen:#dff3e8;--gelb:#fff3d6;--rot:#fde3e6}
+*{box-sizing:border-box}
+body{margin:0;background:#f4f7fb;color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:24px 16px 60px}
+h1{font-size:24px;margin:0 0 4px}
+.unter{color:var(--leise);margin:0 0 18px}
+.karte{background:#fff;border:1px solid var(--rand);border-radius:12px;padding:16px;margin-bottom:12px}
+.felder{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
+.felder .breit{grid-column:1/-1}
+label{display:block;font-size:13px;font-weight:600;color:var(--leise);margin-bottom:4px}
+input,select{width:100%;padding:9px 10px;border:1px solid var(--rand);border-radius:8px;font:inherit;color:var(--ink);background:#fff}
+.pensum{display:flex;gap:6px;align-items:center}
+button,.knopf{background:var(--blau);color:var(--ink);border:1px solid #a9c5ec;border-radius:8px;padding:9px 16px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}
+button:hover,.knopf:hover{background:#bcd4f3}
+button:disabled{opacity:.55;cursor:wait}
+.gross{font-size:16px;padding:11px 22px;margin-top:14px}
+.status{margin:14px 0;padding:10px 14px;border-radius:8px;background:var(--gelb);display:none}
+.status.fehler{background:var(--rot)}
+.kopf{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin:20px 0 10px}
+.kopf h2{font-size:18px;margin:0}
+.leise{color:var(--leise);font-size:13px}
+.stelle{display:grid;grid-template-columns:56px 1fr auto;gap:14px;align-items:start}
+.punkte{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:18px;background:var(--gruen)}
+.punkte.mittel{background:var(--gelb)}.punkte.tief{background:#eceff4}
+.titel{font-weight:700;font-size:16px}
+.grund{margin-top:4px}
+.aktionen{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+.aktionen a.link{color:var(--blau-dunkel);font-size:13px;text-align:center}
+.ergebnis{grid-column:1/-1;border-top:1px solid var(--rand);padding-top:12px;margin-top:4px}
+.spalten{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.dok{border:1px solid var(--rand);border-radius:8px;padding:12px;background:#fbfcfe;max-height:520px;overflow:auto;white-space:pre-wrap;font-size:13.5px}
+.dok h3{margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;gap:8px;white-space:normal}
+.dok h3 a{font-size:12px;padding:4px 10px}
+.mehr{background:none;border:0;color:var(--blau-dunkel);text-decoration:underline;font-weight:600;padding:0}
+@media (max-width:700px){.felder,.spalten{grid-template-columns:1fr}.stelle{grid-template-columns:44px 1fr}.punkte{width:44px;height:44px;font-size:15px}.aktionen{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<main>
+<h1>Stellen-Finder</h1>
+<p class="unter">Sucht auf jobs.ch, jobup.ch, LinkedIn und Job-Room (RAV) und zeigt die Stellen, die zu deinem Lebenslauf passen. Klick auf „Bewerbung erstellen“: angepasster Lebenslauf und Anschreiben.</p>
+
+<div class="karte">
+  <div class="felder">
+    <div class="breit"><label for="cv">Lebenslauf</label><select id="cv"></select></div>
+    <div><label for="stichworte">Stichworte (leer = Claude wählt aus dem Lebenslauf)</label><input id="stichworte" placeholder="z. B. Integration, Projektleitung"></div>
+    <div><label for="ort">Ort / Region (leer = ganze Schweiz)</label><input id="ort" placeholder="z. B. Luzern"></div>
+    <div><label>Pensum %</label><div class="pensum"><input id="von" type="number" min="0" max="100" value="60"> – <input id="bis" type="number" min="0" max="100" value="100"></div></div>
+  </div>
+  <button class="gross" id="suchen">Stellen suchen</button>
+</div>
+
+<div class="status" id="status"></div>
+
+<div id="liste"></div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let stand = null, alleZeigen = false, offen = new Set();
+const timer = {};   // ein Abfrage-Timer pro Stelle, nie mehrere
+
+async function api(pfad, daten) {
+  const r = await fetch(pfad, daten ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(daten)} : {});
+  return r.json();
+}
+
+function status(text, fehler) {
+  const s = $("#status");
+  s.style.display = text ? "block" : "none";
+  s.className = "status" + (fehler ? " fehler" : "");
+  s.textContent = text || "";
+}
+
+async function laden() {
+  const liste = await api("/api/lebenslaeufe");
+  const sel = $("#cv");
+  liste.forEach(p => { const o = el("option", null, p.replace(/^.*\/(Downloads|Documents)\//, "$1/")); o.value = p; sel.append(o); });
+  try { const g = localStorage.getItem("eingabe"); if (g) { const e = JSON.parse(g);
+    if (liste.includes(e.lebenslauf)) sel.value = e.lebenslauf;
+    $("#stichworte").value = e.stichworte || ""; $("#ort").value = e.ort || "";
+    $("#von").value = e.pensum_von ?? 60; $("#bis").value = e.pensum_bis ?? 100; } } catch (e) {}
+  aktualisieren();
+}
+
+async function aktualisieren() {
+  stand = await api("/api/stand");
+  const z = stand.zustand;
+  $("#suchen").disabled = z.laeuft;
+  if (z.laeuft) status("⏳ " + z.meldung);
+  else if (z.fehler) status("Fehler: " + z.fehler, true);
+  else status("");
+  zeichnen();
+  if (z.laeuft) setTimeout(aktualisieren, 1500);
+}
+
+function zeichnen() {
+  const box = $("#liste"); box.innerHTML = "";
+  const s = stand.suche; if (!s || !s.stellen) return;
+  const passend = s.stellen.filter(x => x.punkte >= stand.mindestens);
+  const zeigen = alleZeigen ? s.stellen : passend;
+  const kopf = el("div", "kopf");
+  kopf.append(el("h2", null, `${passend.length} passende Stellen`));
+  kopf.append(el("span", "leise", `Suche vom ${s.zeit} · Stichworte: ${s.stichworte.join(", ")} · ${s.ort || "ganze Schweiz"} · ${s.pensum[0]}–${s.pensum[1]} % · ${s.stellen.length} geprüft`));
+  box.append(kopf);
+  if (s.portal_fehler && s.portal_fehler.length) box.append(el("p", "leise", "Nicht erreichbar: " + s.portal_fehler.join("; ")));
+  zeigen.forEach(st => box.append(karte(st)));
+  const rest = s.stellen.length - passend.length;
+  if (rest > 0) { const b = el("button", "mehr", alleZeigen ? "Nur passende zeigen" : `Auch die ${rest} weniger passenden zeigen`);
+    b.onclick = () => { alleZeigen = !alleZeigen; zeichnen(); }; box.append(b); }
+}
+
+function karte(st) {
+  const k = el("div", "karte stelle");
+  k.append(el("div", "punkte" + (st.punkte >= 70 ? "" : st.punkte >= stand.mindestens ? " mittel" : " tief"), st.punkte));
+  const mitte = el("div");
+  mitte.append(el("div", "titel", st.titel));
+  const p = st.pensum ? ` · ${st.pensum[0] === st.pensum[1] ? st.pensum[0] : st.pensum[0] + "–" + st.pensum[1]} %` : "";
+  mitte.append(el("div", "leise", `${st.firma || "—"} · ${st.ort || "—"}${p} · ${st.portal}${st.datum ? " · " + st.datum.split("-").reverse().join(".") : ""}`));
+  mitte.append(el("div", "grund", st.grund));
+  k.append(mitte);
+  const akt = el("div", "aktionen");
+  const status = stand.bewerbungen[st.key];
+  const b = el("button", null, status === "fertig" ? "Bewerbung ansehen" : status === "laeuft" ? "Wird erstellt …" : "Bewerbung erstellen");
+  b.onclick = () => bewerbung(st.key, k, b);
+  akt.append(b);
+  if (/^https:\/\//.test(st.link || "")) { const a = el("a", "link", "Inserat öffnen ↗"); a.href = st.link; a.target = "_blank"; a.rel = "noopener"; akt.append(a); }
+  k.append(akt);
+  if (offen.has(st.key) || status === "laeuft") setTimeout(() => bewerbung(st.key, k, b, true), 0);
+  return k;
+}
+
+async function bewerbung(key, k, knopf, nurAnzeigen) {
+  clearTimeout(timer[key]);
+  if (!k.isConnected) return;   // Karte wurde neu gezeichnet
+  offen.add(key);
+  let e = await api("/api/bewerbung/" + encodeURIComponent(key));
+  if (e.status === "keine" || e.status === "fehler") {
+    if (nurAnzeigen && e.status === "keine") return;
+    if (!nurAnzeigen) {
+      const r = await api("/api/bewerbung", {key});
+      e = r.fehler ? {status: "fehler", fehler: r.fehler} : {status: "laeuft", meldung: "Starte …"};
+    }
+  }
+  let box = k.querySelector(".ergebnis");
+  if (!box) { box = el("div", "ergebnis"); k.append(box); }
+  box.innerHTML = "";
+  if (e.status === "laeuft") {
+    knopf.disabled = true; knopf.textContent = "Wird erstellt …";
+    box.append(el("div", "leise", "⏳ " + (e.meldung || "")));
+    timer[key] = setTimeout(() => bewerbung(key, k, knopf, true), 2000);
+    return;
+  }
+  knopf.disabled = false;
+  if (e.status === "fehler") { knopf.textContent = "Nochmal versuchen"; const f = el("div", "status fehler", "Fehler: " + e.fehler); f.style.display = "block"; box.append(f); return; }
+  knopf.textContent = "Neu erstellen";
+  knopf.onclick = () => api("/api/bewerbung", {key}).then(() => bewerbung(key, k, knopf, true));
+  const sp = el("div", "spalten");
+  [["Lebenslauf", e.lebenslauf], ["Anschreiben", e.anschreiben]].forEach(([name, text]) => {
+    const d = el("div", "dok"); const h = el("h3"); h.append(el("span", null, name));
+    const dl = el("a", "knopf", "Word herunterladen"); dl.href = `/download/${encodeURIComponent(key)}/${name}.docx`;
+    h.append(dl); d.append(h); d.append(name === "Lebenslauf" ? markdown(text) : el("div", null, text)); sp.append(d);
+  });
+  box.append(sp);
+}
+
+// Einfaches Markdown (#, ##, -, **fett**) sicher als DOM, ohne innerHTML.
+function markdown(text) {
+  const box = el("div"); box.style.whiteSpace = "normal";
+  const zeile = (tag, inhalt, stil) => {
+    const e = el(tag); if (stil) e.style.cssText = stil;
+    inhalt.split(/\*\*(.+?)\*\*/).forEach((t, i) => { if (t) e.append(i % 2 ? el("strong", null, t) : document.createTextNode(t)); });
+    return e;
+  };
+  let liste = null;
+  text.split("\n").forEach(z => {
+    if (!z.trim()) { liste = null; return; }
+    if (/^\s*[-•*] /.test(z)) {
+      if (!liste) { liste = el("ul"); liste.style.cssText = "margin:4px 0;padding-left:18px"; box.append(liste); }
+      liste.append(zeile("li", z.replace(/^\s*[-•*] /, ""))); return;
+    }
+    liste = null;
+    if (z.startsWith("# ")) box.append(zeile("div", z.slice(2), "font-size:18px;font-weight:800"));
+    else if (z.startsWith("## ")) box.append(zeile("div", z.slice(3).toUpperCase(), "font-weight:800;color:#1f4e8c;margin-top:12px;font-size:12.5px;letter-spacing:.04em"));
+    else box.append(zeile("div", z.replace(/^#+ /, ""), "margin:2px 0"));
+  });
+  return box;
+}
+
+$("#suchen").onclick = async () => {
+  const eingabe = {lebenslauf: $("#cv").value, stichworte: $("#stichworte").value, ort: $("#ort").value,
+                   pensum_von: +$("#von").value, pensum_bis: +$("#bis").value};
+  try { localStorage.setItem("eingabe", JSON.stringify(eingabe)); } catch (e) {}
+  offen.clear(); alleZeigen = false;
+  const r = await api("/api/suchen", eingabe);
+  if (r.fehler) status(r.fehler, true);
+  aktualisieren();
+};
+laden();
+</script>
+</body>
+</html>
