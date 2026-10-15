@@ -27,7 +27,8 @@ PORT = 8813
 HIER = Path(__file__).parent
 DATEN = HIER / "daten"
 SUCHE_DATEI = DATEN / "suche.json"
-MAX_BEWERTEN = 160    # mehr Stellen machen die Bewertung langsam und ungenau
+MAX_BEWERTEN = 400    # mit Lebenslauf: so viele Stellen prueft Claude hoechstens
+KI_GLEICHZEITIG = 5   # Claude-Laeufe parallel
 PRO_KI_LAUF = 40
 MINDESTENS = 50       # ab dieser Punktzahl gilt eine Stelle als passend
 MAX_ANFRAGE = 64_000
@@ -172,7 +173,7 @@ def _auswahl(stellen, stichworte):
     auswahl = []
     for runde in range(max(map(len, gruppen), default=0)):
         auswahl += [g[runde] for g in gruppen if runde < len(g)]
-    return auswahl[:MAX_BEWERTEN]
+    return auswahl
 
 
 def suche_starten(eingabe):
@@ -196,10 +197,11 @@ def suche_starten(eingabe):
             raise RuntimeError("Keine Stellen gefunden. " + "; ".join(fehler))
         stellen = _auswahl(stellen, stichworte)
         if cv:
+            stellen = stellen[:MAX_BEWERTEN]
             _melden(f"Claude prüft {len(stellen)} Stellen gegen deinen Lebenslauf (1–3 Min.) …")
             pakete = [stellen[i:i + PRO_KI_LAUF] for i in range(0, len(stellen), PRO_KI_LAUF)]
             punkte = {}
-            with ThreadPoolExecutor(len(pakete)) as pool:
+            with ThreadPoolExecutor(min(len(pakete), KI_GLEICHZEITIG)) as pool:
                 for teil in pool.map(lambda p: _bewerten(cv, p), pakete):
                     punkte.update(teil)
             for s in stellen:

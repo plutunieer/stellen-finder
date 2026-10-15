@@ -15,11 +15,14 @@ import json
 import re
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130 Safari/537.36")
 ZEITLIMIT = 25
-PRO_ABFRAGE = 20
+PRO_ABFRAGE = 20        # jobs.ch/jobup.ch geben hoechstens 20 je Seite heraus
+MAX_PRO_PORTAL = 300    # Treffer je Portal und Stichwort (alle Seiten zusammen)
+LINKEDIN_SEITEN = 5     # je 10 Treffer; LinkedIn sperrt bei vielen Abfragen (429)
 
 
 def _holen(url, daten=None):
@@ -59,13 +62,27 @@ def _pensum(von, bis):
 # --- jobs.ch / jobup.ch -------------------------------------------------------
 
 def _jobcloud(portal, domain, stichwort, ort):
+    """Alle Ergebnisseiten (je 20) bis MAX_PRO_PORTAL, gleichzeitig abgerufen."""
     q = {"query": stichwort, "rows": PRO_ABFRAGE}
     if ort:
         q["location"] = _jobcloud_ort(ort)
-    daten = json.loads(_holen(f"https://www.{domain}/api/v1/public/search?"
-                              + urllib.parse.urlencode(q)))
+    seite = lambda nr: json.loads(_holen(f"https://www.{domain}/api/v1/public/search?"
+                                         + urllib.parse.urlencode({**q, "page": nr})))
+    def seite_sicher(nr):          # eine kaputte Seite kostet nur ihre 20 Treffer
+        try:
+            return seite(nr)
+        except Exception:
+            return {}
+
+    erste = seite(1)
+    letzte = min(int(erste.get("num_pages") or 1), MAX_PRO_PORTAL // PRO_ABFRAGE)
+    dokumente = list(erste.get("documents", []))
+    if letzte > 1:
+        with ThreadPoolExecutor(6) as pool:
+            for daten in pool.map(seite_sicher, range(2, letzte + 1)):
+                dokumente += daten.get("documents", [])
     stellen = []
-    for d in daten.get("documents", []):
+    for d in dokumente:
         grade = d.get("employment_grades") or []
         link = (d.get("_links", {}).get("detail_de")
                 or d.get("_links", {}).get("detail_fr")
@@ -131,7 +148,7 @@ def _linkedin(stichwort, ort):
     except Exception:
         kanton = None     # Ort bei Job-Room unbekannt: LinkedIn ungefiltert
     if not kanton:
-        return _linkedin_roh(stichwort, ort)
+        return _linkedin_roh(stichwort, ort, LINKEDIN_SEITEN)
     code = _kanton_code(kanton)
     namen = [kanton] + KANTON_ANDERE.get(code, [])
     muster = re.compile(r"\b(" + "|".join(re.escape(n.lower()) for n in namen) + r")\b(?! ausserrhoden)")
@@ -139,17 +156,36 @@ def _linkedin(stichwort, ort):
     for anfrage in [f"Kanton {kanton}"] + namen:
         stellen = [s for s in _linkedin_roh(stichwort, anfrage) if muster.search(s["ort"].lower())]
         if stellen:
-            return stellen
+            # Diese Schreibweise funktioniert: die weiteren Seiten dazuholen.
+            # Faellt dabei etwas aus, bleiben die Treffer von Seite 1.
+            try:
+                mehr = _linkedin_roh(stichwort, anfrage, LINKEDIN_SEITEN, ab=1)
+            except Exception:
+                mehr = []
+            bekannt = {s["key"] for s in stellen}
+            return stellen + [s for s in mehr if s["key"] not in bekannt
+                              and muster.search(s["ort"].lower())]
     return []
 
 
-def _linkedin_roh(stichwort, ort):
-    q = {"keywords": stichwort, "location": f"{ort}, Schweiz" if ort else "Schweiz",
-         "start": 0}
-    roh = _holen("https://www.linkedin.com/jobs-guest/jobs/api/"
-                 "seeMoreJobPostings/search?" + urllib.parse.urlencode(q))
-    stellen = []
-    for karte in roh.split("<li")[1:]:
+def _linkedin_roh(stichwort, ort, seiten=1, ab=0):
+    q = {"keywords": stichwort, "location": f"{ort}, Schweiz" if ort else "Schweiz"}
+    karten = []
+    for nr in range(ab, seiten):
+        try:
+            roh = _holen("https://www.linkedin.com/jobs-guest/jobs/api/"
+                         "seeMoreJobPostings/search?"
+                         + urllib.parse.urlencode({**q, "start": nr * 10}))
+        except Exception:
+            if nr == ab:
+                raise
+            break             # spaetere Seite gesperrt: mit dem bisher Gefundenen weiter
+        neu = roh.split("<li")[1:]
+        if not neu:
+            break
+        karten += neu
+    stellen, gesehen = [], set()
+    for karte in karten:
         nr = re.search(r"urn:li:jobPosting:(\d+)", karte)
         titel = re.search(r'base-search-card__title">\s*([^<]+)', karte)
         if not nr or not titel:
@@ -157,6 +193,9 @@ def _linkedin_roh(stichwort, ort):
         firma = re.search(r'base-search-card__subtitle">.*?>\s*([^<]+?)\s*<', karte, re.S)
         ort_ = re.search(r'job-search-card__location">\s*([^<]+)', karte)
         datum = re.search(r'datetime="([\d-]+)"', karte)
+        if nr.group(1) in gesehen:
+            continue
+        gesehen.add(nr.group(1))
         stellen.append({
             "key": f"linkedin:{nr.group(1)}", "portal": "linkedin",
             "titel": html.unescape(titel.group(1).strip().splitlines()[0].strip()),
@@ -166,7 +205,7 @@ def _linkedin_roh(stichwort, ort):
             "link": f"https://www.linkedin.com/jobs/view/{nr.group(1)}/",
             "vorschau": "",
         })
-    return stellen[:PRO_ABFRAGE]
+    return stellen
 
 
 def _linkedin_text(job_id):
@@ -207,9 +246,14 @@ def _jobroom(stichwort, ort):
                "permanent": None, "companyName": None, "onlineSince": 60,
                "displayRestricted": False, "professionCodes": [],
                "communalCodes": [], "radiusSearchRequest": None}
-    daten = json.loads(_holen(
-        "https://www.job-room.ch/jobadservice/api/jobAdvertisements/_search?"
-        f"page=0&size={PRO_ABFRAGE}&sort=date_desc&language=de", anfrage))
+    daten = []
+    for seite in range(MAX_PRO_PORTAL // 100):
+        teil = json.loads(_holen(
+            "https://www.job-room.ch/jobadservice/api/jobAdvertisements/_search?"
+            f"page={seite}&size=100&sort=date_desc&language=de", anfrage))
+        daten += teil
+        if len(teil) < 100:
+            break
     stellen = []
     for eintrag in daten:
         a = eintrag.get("jobAdvertisement", {})
@@ -266,16 +310,23 @@ def _schluessel(stelle):
 
 def suchen(stichworte, ort, pensum_von, pensum_bis, melden=lambda t: None):
     """Alle Portale x alle Stichworte. Liefert (stellen, fehler)."""
+    def holen(name, stichwort):
+        try:
+            return PORTALE[name](stichwort, ort), None
+        except Exception as e:
+            grund = str(e) if isinstance(e, RuntimeError) else type(e).__name__
+            return [], f"{name} ({stichwort}): {grund}"
+
     gesehen, stellen, fehler = set(), [], []
     for stichwort in stichworte:
-        for name, abfrage in PORTALE.items():
-            melden(f"Suche „{stichwort}“ auf {name} …")
-            try:
-                gefunden = abfrage(stichwort, ort)
-            except Exception as e:
-                grund = str(e) if isinstance(e, RuntimeError) else type(e).__name__
-                fehler.append(f"{name} ({stichwort}): {grund}")
-                continue
+        melden(f"Suche „{stichwort}“ auf allen Portalen …")
+        # Alle Portale gleichzeitig; zusammengefuehrt in fester Reihenfolge, damit
+        # bei Doppelten immer dasselbe Portal gewinnt.
+        with ThreadPoolExecutor(len(PORTALE)) as pool:
+            ergebnisse = list(pool.map(lambda n: holen(n, stichwort), PORTALE))
+        for gefunden, fehlertext in ergebnisse:
+            if fehlertext:
+                fehler.append(fehlertext)
             for s in gefunden:
                 p = s.get("pensum")
                 if p and (p[1] < pensum_von or p[0] > pensum_bis):
