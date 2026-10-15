@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""dokumente.py — Lebenslauf lesen (Word/PDF) und Ergebnisse als Word schreiben."""
+"""dokumente.py — hochgeladenen Lebenslauf lesen (Word/PDF) und Ergebnisse als Word schreiben."""
 
 import re
 import zipfile
@@ -7,30 +7,6 @@ from pathlib import Path
 
 from docx import Document
 from docx.shared import Pt, RGBColor
-
-ORDNER = [Path.home() / "Downloads", Path.home() / "Documents" / "job"]
-MUSTER = re.compile(r"lebenslauf|^cv|resume|curriculum", re.I)
-
-
-def lebenslaeufe():
-    """Alle Lebenslauf-Dateien, neueste zuerst."""
-    dateien = []
-    for ordner in ORDNER:
-        if not ordner.exists():
-            continue
-        try:
-            for p in ordner.rglob("*"):
-                if (p.suffix.lower() in (".docx", ".pdf") and MUSTER.search(p.stem)
-                        and not p.name.startswith("~$")
-                        and len(p.relative_to(ordner).parts) <= 4):
-                    try:
-                        dateien.append((p.stat().st_mtime, str(p)))
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-    dateien.sort(reverse=True)
-    return [p for _, p in dateien]
 
 
 def lebenslauf_text(pfad):

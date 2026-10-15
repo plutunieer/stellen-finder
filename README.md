@@ -5,7 +5,7 @@ Findet passende Stellen in der Schweiz und erstellt auf Klick den angepassten Le
 **Starten:** `./start.sh` → http://localhost:8813
 
 ## Bedienung
-1. Lebenslauf wählen. Die Liste zeigt alle Lebensläufe aus `~/Downloads` und `~/Documents/job`, die neueste Datei steht oben.
+1. Lebenslauf hochladen (Word oder PDF). Die Seite merkt sich genau diese eine Datei, bis du eine neue hochlädst.
 2. Stichworte, Ort und Pensum eingeben (alles optional). Ohne Stichworte leitet Claude die Suchbegriffe aus dem Lebenslauf ab.
 3. **Stellen suchen** (ca. 2 Min.): Die Seite zeigt die Stellen ab 50 Punkten, die beste steht oben.
 4. **Bewerbung erstellen** (ca. 1–3 Min.): Lebenslauf und Anschreiben erscheinen auf der Seite und lassen sich als Word-Datei herunterladen.
@@ -21,4 +21,4 @@ jobs.ch, jobup.ch, LinkedIn und Job-Room (das Stellenportal des Bundes/RAV, es e
 - `ki.py`: alle KI-Aufrufe über die lokale Claude-CLI (Abo, kein API-Schlüssel, ohne Werkzeuge)
 - `dokumente.py`: liest den Lebenslauf (Word/PDF) und schreibt die Word-Dateien
 - `index.html`: die Oberfläche
-- `daten/`: letzte Suche und erstellte Bewerbungen (persönliche Daten, nicht in Git)
+- `daten/`: hochgeladener Lebenslauf, letzte Suche und erstellte Bewerbungen (persönliche Daten, nicht in Git)

@@ -45,14 +45,15 @@ button:disabled{opacity:.55;cursor:wait}
 <body>
 <main>
 <h1>Stellen-Finder</h1>
-<p class="unter">Sucht auf jobs.ch, jobup.ch, LinkedIn und Job-Room (RAV) und zeigt die Stellen, die zu deinem Lebenslauf passen. Klick auf „Bewerbung erstellen“: angepasster Lebenslauf und Anschreiben.</p>
+<p class="unter">Sucht auf jobs.ch, jobup.ch, LinkedIn und Job-Room (RAV). Mit Lebenslauf zeigt Claude, welche Stellen passen, und schreibt auf Klick die Bewerbung.</p>
 
 <div class="karte">
   <div class="felder">
-    <div class="breit"><label for="cv">Lebenslauf</label><select id="cv"></select></div>
-    <div><label for="stichworte">Stichworte (leer = Claude wählt aus dem Lebenslauf)</label><input id="stichworte" placeholder="z. B. Integration, Projektleitung"></div>
+    <div><label for="stichworte">Stichworte</label><input id="stichworte" placeholder="z. B. Integration, Projektleitung"></div>
     <div><label for="ort">Ort / Region (leer = ganze Schweiz)</label><input id="ort" placeholder="z. B. Luzern"></div>
     <div><label>Pensum %</label><div class="pensum"><input id="von" type="number" min="0" max="100" value="60"> – <input id="bis" type="number" min="0" max="100" value="100"></div></div>
+    <div class="breit"><label for="cv">Lebenslauf (freiwillig: für die Passung und die Bewerbung, Word oder PDF)</label>
+      <input id="cv" type="file" accept=".docx,.pdf"><div class="leise" id="cv-name"></div></div>
   </div>
   <button class="gross" id="suchen">Stellen suchen</button>
 </div>
@@ -80,12 +81,27 @@ function status(text, fehler) {
   s.textContent = text || "";
 }
 
+async function cvAnzeigen() {
+  const r = await api("/api/lebenslauf");
+  $("#cv-name").textContent = r.name ? "Aktuell: " + r.name + " (Stichworte leer lassen = Claude wählt sie aus dem Lebenslauf)" : "Kein Lebenslauf hochgeladen. Die Suche geht trotzdem.";
+}
+
+$("#cv").onchange = async () => {
+  const datei = $("#cv").files[0]; if (!datei) return;
+  status("⏳ Lade Lebenslauf hoch …");
+  const bytes = new Uint8Array(await datei.arrayBuffer());
+  let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  let r;
+  try { r = await api("/api/lebenslauf", {name: datei.name, inhalt: btoa(bin)}); }
+  catch (err) { r = {fehler: "Hochladen fehlgeschlagen. Läuft der Server noch?"}; }
+  $("#cv").value = "";
+  if (r.fehler) status("Fehler: " + r.fehler, true); else status("");
+  cvAnzeigen(); aktualisieren();
+};
+
 async function laden() {
-  const liste = await api("/api/lebenslaeufe");
-  const sel = $("#cv");
-  liste.forEach(p => { const o = el("option", null, p.replace(/^.*\/(Downloads|Documents)\//, "$1/")); o.value = p; sel.append(o); });
+  cvAnzeigen();
   try { const g = localStorage.getItem("eingabe"); if (g) { const e = JSON.parse(g);
-    if (liste.includes(e.lebenslauf)) sel.value = e.lebenslauf;
     $("#stichworte").value = e.stichworte || ""; $("#ort").value = e.ort || "";
     $("#von").value = e.pensum_von ?? 60; $("#bis").value = e.pensum_bis ?? 100; } } catch (e) {}
   aktualisieren();
@@ -105,12 +121,14 @@ async function aktualisieren() {
 function zeichnen() {
   const box = $("#liste"); box.innerHTML = "";
   const s = stand.suche; if (!s || !s.stellen) return;
-  const passend = s.stellen.filter(x => x.punkte >= stand.mindestens);
+  const bewertet = s.bewertet !== false;
+  const passend = bewertet ? s.stellen.filter(x => x.punkte >= stand.mindestens) : s.stellen;
   const zeigen = alleZeigen ? s.stellen : passend;
   const kopf = el("div", "kopf");
-  kopf.append(el("h2", null, `${passend.length} passende Stellen`));
+  kopf.append(el("h2", null, bewertet ? `${passend.length} passende Stellen` : `${s.stellen.length} Stellen gefunden`));
   kopf.append(el("span", "leise", `Suche vom ${s.zeit} · Stichworte: ${s.stichworte.join(", ")} · ${s.ort || "ganze Schweiz"} · ${s.pensum[0]}–${s.pensum[1]} % · ${s.stellen.length} geprüft`));
   box.append(kopf);
+  if (!bewertet) box.append(el("p", "leise", "Ohne Lebenslauf nicht nach Passung sortiert, die neuesten stehen oben. Mit Lebenslauf neu suchen, dann bewertet Claude jede Stelle."));
   if (s.portal_fehler && s.portal_fehler.length) box.append(el("p", "leise", "Nicht erreichbar: " + s.portal_fehler.join("; ")));
   zeigen.forEach(st => box.append(karte(st)));
   const rest = s.stellen.length - passend.length;
@@ -120,7 +138,8 @@ function zeichnen() {
 
 function karte(st) {
   const k = el("div", "karte stelle");
-  k.append(el("div", "punkte" + (st.punkte >= 70 ? "" : st.punkte >= stand.mindestens ? " mittel" : " tief"), st.punkte));
+  k.append(st.punkte == null ? el("div", "punkte tief", "–")
+    : el("div", "punkte" + (st.punkte >= 70 ? "" : st.punkte >= stand.mindestens ? " mittel" : " tief"), st.punkte));
   const mitte = el("div");
   mitte.append(el("div", "titel", st.titel));
   const p = st.pensum ? ` · ${st.pensum[0] === st.pensum[1] ? st.pensum[0] : st.pensum[0] + "–" + st.pensum[1]} %` : "";
@@ -144,7 +163,10 @@ async function bewerbung(key, k, knopf, nurAnzeigen) {
   offen.add(key);
   let e = await api("/api/bewerbung/" + encodeURIComponent(key));
   if (e.status === "keine" || e.status === "fehler") {
-    if (nurAnzeigen && e.status === "keine") return;
+    if (nurAnzeigen && e.status === "keine") {   // z. B. nach neuem Lebenslauf verworfen
+      offen.delete(key); k.querySelector(".ergebnis")?.remove();
+      knopf.disabled = false; knopf.textContent = "Bewerbung erstellen"; return;
+    }
     if (!nurAnzeigen) {
       const r = await api("/api/bewerbung", {key});
       e = r.fehler ? {status: "fehler", fehler: r.fehler} : {status: "laeuft", meldung: "Starte …"};
@@ -196,7 +218,7 @@ function markdown(text) {
 }
 
 $("#suchen").onclick = async () => {
-  const eingabe = {lebenslauf: $("#cv").value, stichworte: $("#stichworte").value, ort: $("#ort").value,
+  const eingabe = {stichworte: $("#stichworte").value, ort: $("#ort").value,
                    pensum_von: +$("#von").value, pensum_bis: +$("#bis").value};
   try { localStorage.setItem("eingabe", JSON.stringify(eingabe)); } catch (e) {}
   offen.clear(); alleZeigen = false;

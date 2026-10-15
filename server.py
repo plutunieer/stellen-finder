@@ -6,9 +6,12 @@ Klick auf eine Stelle: Claude passt den Lebenslauf an und schreibt das Anschreib
 Nichts wird verschickt.
 """
 
+import base64
 import hashlib
 import json
+import os
 import re
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +31,8 @@ MAX_BEWERTEN = 160    # mehr Stellen machen die Bewertung langsam und ungenau
 PRO_KI_LAUF = 40
 MINDESTENS = 50       # ab dieser Punktzahl gilt eine Stelle als passend
 MAX_ANFRAGE = 64_000
+MAX_LEBENSLAUF = 10_000_000   # Upload als Base64 im JSON
+CV_ORDNER = DATEN / "lebenslauf"   # genau EIN hochgeladener Lebenslauf
 # Nur Aufrufe von der eigenen Seite annehmen (Schutz gegen fremde Webseiten,
 # die per DNS-Rebinding oder CSRF auf den lokalen Server zugreifen wollen).
 EIGENE_HOSTS = (f"localhost:{PORT}", f"127.0.0.1:{PORT}")
@@ -40,11 +45,42 @@ bewerbungen = {}      # key -> {"status", "fehler", "lebenslauf", "anschreiben"}
 sperre = threading.Lock()
 
 
-def _ordner(key, cv=None):
+def _lebenslauf():
+    """Pfad des hochgeladenen Lebenslaufs oder None. Nur echte .docx/.pdf —
+    versteckte Dateien (.DS_Store, laufende Uploads) zaehlen nicht."""
+    try:
+        dateien = [p for p in CV_ORDNER.iterdir()
+                   if p.is_file() and not p.name.startswith(".")
+                   and p.suffix.lower() in (".docx", ".pdf")]
+        return str(max(dateien, key=lambda p: p.stat().st_mtime_ns)) if dateien else None
+    except OSError:
+        return None
+
+
+def _cv_kennung(pfad):
+    """Erkennt einen neu hochgeladenen Lebenslauf auch bei gleichem Dateinamen."""
+    try:
+        st = Path(pfad).stat()
+    except (OSError, TypeError):
+        return ""
+    return f"{Path(pfad).name}|{st.st_size}|{st.st_mtime_ns}"
+
+
+def _aktueller_cv(text=False):
+    """(pfad, kennung[, text]) des aktuellen Lebenslaufs, unter der Sperre gelesen,
+    damit ein gleichzeitiger Upload nichts halb Ausgetauschtes liefert."""
+    with sperre:
+        pfad = _lebenslauf()
+        kennung = _cv_kennung(pfad)
+        if not text:
+            return pfad, kennung
+        return pfad, kennung, (dokumente.lebenslauf_text(pfad) if pfad else None)
+
+
+def _ordner(key, kennung):
     """Eine Bewerbung gehoert zu Stelle UND Lebenslauf: anderer Lebenslauf,
     anderer Ordner. Der Hash macht den Namen ausserdem pfadsicher."""
-    cv = cv or suche.get("lebenslauf", "")
-    return DATEN / "bewerbungen" / hashlib.sha1(f"{key}|{cv}".encode()).hexdigest()[:20]
+    return DATEN / "bewerbungen" / hashlib.sha1(f"{key}|{kennung}".encode()).hexdigest()[:20]
 
 
 def _speichern():
@@ -53,20 +89,25 @@ def _speichern():
 
 
 def _bewerbungen_laden():
-    """Fertige Bewerbungen zur aktuellen Suche (gleicher Lebenslauf) von der Platte."""
+    """Fertige Bewerbungen zur aktuellen Suche und zum aktuellen Lebenslauf."""
+    _, kennung = _aktueller_cv()
     neu = {}
     for s in suche.get("stellen", []):
-        o = _ordner(s["key"])
-        if all((o / d).exists() for d in DATEIEN):
+        o = _ordner(s["key"], kennung)
+        if kennung and all((o / d).exists() for d in DATEIEN):
             neu[s["key"]] = {
-                "status": "fertig",
+                "status": "fertig", "kennung": kennung,
                 "lebenslauf": (o / "lebenslauf.md").read_text("utf-8"),
                 "anschreiben": (o / "anschreiben.txt").read_text("utf-8")}
     with sperre:
-        laufend = {k: v for k, v in bewerbungen.items() if v.get("status") == "laeuft"}
+        # Laufende behalten; fertige nur, wenn sie zum aktuellen Lebenslauf gehoeren
+        # (koennen zwischen Lesen und Sperre fertig geworden sein).
+        behalten = {k: v for k, v in bewerbungen.items() if k not in neu and (
+            v.get("status") == "laeuft"
+            or (v.get("status") == "fertig" and v.get("kennung") == kennung))}
         bewerbungen.clear()
         bewerbungen.update(neu)
-        bewerbungen.update(laufend)
+        bewerbungen.update(behalten)
 
 
 def _laden():
@@ -74,6 +115,40 @@ def _laden():
     if SUCHE_DATEI.exists():
         suche = json.loads(SUCHE_DATEI.read_text("utf-8"))
     _bewerbungen_laden()
+
+
+def _hochladen(eingabe):
+    """Unter der Sperre aufrufen. Der neue Lebenslauf wird erst geprueft, dann per
+    os.replace in einem Schritt an seinen Platz gelegt; erst danach verschwindet der
+    alte. So gibt es nie einen Moment ohne gueltigen Lebenslauf."""
+    name = Path(str(eingabe.get("name", ""))).name
+    endung = Path(name).suffix.lower()
+    if endung not in (".docx", ".pdf"):
+        raise RuntimeError("Bitte eine Word- (.docx) oder PDF-Datei hochladen.")
+    inhalt = base64.b64decode(str(eingabe.get("inhalt", "")), validate=True)
+    CV_ORDNER.mkdir(parents=True, exist_ok=True)
+    for rest in CV_ORDNER.glob(".upload-*"):      # Reste eines Absturzes
+        rest.unlink(missing_ok=True)
+    tmp = CV_ORDNER / f".upload-{time.time_ns()}{endung}"
+    tmp.write_bytes(inhalt)
+    try:
+        lesbar = len(dokumente.lebenslauf_text(tmp)) >= 200
+    except Exception:
+        lesbar = False
+    if not lesbar:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("Die Datei lässt sich nicht lesen (beschädigt oder eingescannt?).")
+    stamm = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(name).stem).strip(" .")[:80] or "lebenslauf"
+    ziel = CV_ORDNER / (stamm + endung)
+    os.replace(tmp, ziel)
+    os.utime(ziel)                                  # gilt sicher als neueste Datei
+    for alt in CV_ORDNER.iterdir():
+        if alt != ziel:
+            if alt.is_dir():
+                shutil.rmtree(alt, ignore_errors=True)
+            else:
+                alt.unlink(missing_ok=True)
+    return ziel.name
 
 
 def _melden(text):
@@ -103,13 +178,14 @@ def _auswahl(stellen, stichworte):
 def suche_starten(eingabe):
     global suche
     try:
-        cv_pfad = eingabe.get("lebenslauf", "")
-        if cv_pfad not in dokumente.lebenslaeufe():
-            raise RuntimeError("Lebenslauf-Datei nicht gefunden.")
-        _melden("Lese Lebenslauf …")
-        cv = dokumente.lebenslauf_text(cv_pfad)
+        # Der Lebenslauf ist fuer die Suche freiwillig: ohne ihn gibt es alle
+        # Treffer (neueste zuerst), mit ihm bewertet Claude die Passung.
+        _, _, cv = _aktueller_cv(text=True)
         stichworte = [s.strip() for s in re.split(r"[,;\n]", str(eingabe.get("stichworte", ""))) if s.strip()]
         if not stichworte:
+            if not cv:
+                raise RuntimeError("Bitte ein Stichwort eingeben (z. B. „Sozialberatung“). "
+                                   "Mit hochgeladenem Lebenslauf wählt Claude die Stichworte selbst.")
             _melden("Claude leitet Suchbegriffe aus dem Lebenslauf ab …")
             stichworte = ki.suchbegriffe(cv)
         stichworte = list({w.lower(): w for w in stichworte}.values())
@@ -119,16 +195,21 @@ def suche_starten(eingabe):
         if not stellen:
             raise RuntimeError("Keine Stellen gefunden. " + "; ".join(fehler))
         stellen = _auswahl(stellen, stichworte)
-        _melden(f"Claude prüft {len(stellen)} Stellen gegen deinen Lebenslauf (1–3 Min.) …")
-        pakete = [stellen[i:i + PRO_KI_LAUF] for i in range(0, len(stellen), PRO_KI_LAUF)]
-        punkte = {}
-        with ThreadPoolExecutor(len(pakete)) as pool:
-            for teil in pool.map(lambda p: _bewerten(cv, p), pakete):
-                punkte.update(teil)
-        for s in stellen:
-            s["punkte"], s["grund"] = punkte.get(s["key"], (0, "nicht bewertet"))
-        stellen.sort(key=lambda s: s["punkte"], reverse=True)
-        suche = {"zeit": time.strftime("%d.%m.%Y %H:%M"), "lebenslauf": cv_pfad,
+        if cv:
+            _melden(f"Claude prüft {len(stellen)} Stellen gegen deinen Lebenslauf (1–3 Min.) …")
+            pakete = [stellen[i:i + PRO_KI_LAUF] for i in range(0, len(stellen), PRO_KI_LAUF)]
+            punkte = {}
+            with ThreadPoolExecutor(len(pakete)) as pool:
+                for teil in pool.map(lambda p: _bewerten(cv, p), pakete):
+                    punkte.update(teil)
+            for s in stellen:
+                s["punkte"], s["grund"] = punkte.get(s["key"], (0, "nicht bewertet"))
+            stellen.sort(key=lambda s: s["punkte"], reverse=True)
+        else:
+            for s in stellen:
+                s["punkte"], s["grund"] = None, ""
+            stellen.sort(key=lambda s: s.get("datum") or "", reverse=True)
+        suche = {"zeit": time.strftime("%d.%m.%Y %H:%M"), "bewertet": bool(cv),
                  "stichworte": stichworte, "ort": ort, "pensum": [von, bis],
                  "stellen": stellen, "portal_fehler": fehler}
         _speichern()
@@ -142,15 +223,16 @@ def suche_starten(eingabe):
         zustand["meldung"] = ""
 
 
-def bewerbung_erstellen(key, stelle, cv_pfad):
+def bewerbung_erstellen(key, stelle, cv, kennung):
+    """cv (Text) und kennung wurden beim Klick festgehalten — ein Upload waehrend
+    des Laufs kann den Inhalt nicht mehr vermischen."""
     eintrag = bewerbungen[key]
     try:
         eintrag["meldung"] = "Hole den vollen Inseratetext …"
         inserat = portale.inseratetext(stelle)
-        cv = dokumente.lebenslauf_text(cv_pfad)
         eintrag["meldung"] = "Claude schreibt Lebenslauf und Anschreiben (1–3 Min.) …"
         lebenslauf, anschreiben = ki.bewerbung(cv, stelle, inserat, time.strftime("%d.%m.%Y"))
-        o = _ordner(key, cv_pfad)
+        o = _ordner(key, kennung)
         o.mkdir(parents=True, exist_ok=True)
         (o / "inserat.txt").write_text(inserat, "utf-8")
         # Reihenfolge: lebenslauf.md zuletzt — erst dann gilt die Bewerbung als fertig.
@@ -158,13 +240,16 @@ def bewerbung_erstellen(key, stelle, cv_pfad):
         dokumente.anschreiben_docx(anschreiben, o / "Anschreiben.docx")
         (o / "anschreiben.txt").write_text(anschreiben, "utf-8")
         (o / "lebenslauf.md").write_text(lebenslauf, "utf-8")
-        if suche.get("lebenslauf") == cv_pfad:
-            eintrag.update(status="fertig", lebenslauf=lebenslauf, anschreiben=anschreiben)
-        elif bewerbungen.get(key) is eintrag:
-            bewerbungen.pop(key, None)   # inzwischen anderer Lebenslauf gewählt
+        with sperre:   # Pruefen und Setzen in einem Schritt (Upload dazwischen)
+            if _cv_kennung(_lebenslauf()) == kennung:
+                eintrag.update(status="fertig", kennung=kennung,
+                               lebenslauf=lebenslauf, anschreiben=anschreiben)
+            elif bewerbungen.get(key) is eintrag:
+                bewerbungen.pop(key, None)   # inzwischen anderer Lebenslauf gewählt
     except Exception as e:
         print("Bewerbung fehlgeschlagen:", repr(e))
-        eintrag.update(status="fehler", fehler=str(e))
+        with sperre:
+            eintrag.update(status="fehler", fehler=str(e))
 
 
 def _stelle(key):
@@ -200,8 +285,9 @@ class Handler(BaseHTTPRequestHandler):
         pfad = self.path.split("?")[0]
         if pfad == "/":
             return self._senden(200, (HIER / "index.html").read_bytes(), "text/html; charset=utf-8")
-        if pfad == "/api/lebenslaeufe":
-            return self._senden(200, dokumente.lebenslaeufe())
+        if pfad == "/api/lebenslauf":
+            cv = _lebenslauf()
+            return self._senden(200, {"name": Path(cv).name if cv else None})
         if pfad == "/api/stand":
             with sperre:
                 status = {k: v.get("status") for k, v in bewerbungen.items()}
@@ -209,10 +295,12 @@ class Handler(BaseHTTPRequestHandler):
                                       "mindestens": MINDESTENS, "bewerbungen": status})
         m = re.fullmatch(r"/api/bewerbung/(.+)", pfad)
         if m:
-            return self._senden(200, bewerbungen.get(unquote(m.group(1)), {"status": "keine"}))
+            with sperre:
+                e = dict(bewerbungen.get(unquote(m.group(1)), {"status": "keine"}))
+            return self._senden(200, e)
         m = re.fullmatch(r"/download/(.+)/(Lebenslauf|Anschreiben)\.docx", pfad)
         if m and _stelle(unquote(m.group(1))):
-            datei = _ordner(unquote(m.group(1))) / f"{m.group(2)}.docx"
+            datei = _ordner(unquote(m.group(1)), _aktueller_cv()[1]) / f"{m.group(2)}.docx"
             if datei.exists():
                 return self._senden(200, datei.read_bytes(),
                                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -222,13 +310,30 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self._fremd() or not (self.headers.get("Content-Type") or "").startswith("application/json"):
             return self._senden(403, {"fehler": "verboten"})
-        laenge = int(self.headers.get("Content-Length") or 0)
-        if laenge > MAX_ANFRAGE:
+        try:
+            laenge = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            laenge = -1
+        if laenge < 0:
+            return self._senden(400, {"fehler": "ungültige Länge"})
+        if laenge > (MAX_LEBENSLAUF if self.path == "/api/lebenslauf" else MAX_ANFRAGE):
             return self._senden(413, {"fehler": "zu gross"})
         try:
             eingabe = json.loads(self.rfile.read(laenge) or b"{}")
         except ValueError:
             return self._senden(400, {"fehler": "ungültige Eingabe"})
+        if self.path == "/api/lebenslauf":
+            with sperre:
+                try:
+                    name = _hochladen(eingabe)
+                except (RuntimeError, ValueError) as e:
+                    return self._senden(400, {"fehler": str(e) if isinstance(e, RuntimeError)
+                                              else "Datei beschädigt."})
+                except OSError as e:
+                    print("Upload fehlgeschlagen:", repr(e))
+                    return self._senden(500, {"fehler": "Speichern fehlgeschlagen."})
+            _bewerbungen_laden()   # Bewerbungen zum alten Lebenslauf ausblenden
+            return self._senden(200, {"name": name})
         if self.path == "/api/suchen":
             with sperre:
                 if zustand["laeuft"]:
@@ -241,11 +346,18 @@ class Handler(BaseHTTPRequestHandler):
             stelle = _stelle(key)
             if not stelle:
                 return self._senden(404, {"fehler": "Stelle gehört nicht zur aktuellen Suche."})
+            try:
+                cv_pfad, kennung, cv = _aktueller_cv(text=True)
+            except Exception as e:
+                print("Lebenslauf nicht lesbar:", repr(e))
+                return self._senden(400, {"fehler": "Der Lebenslauf lässt sich nicht lesen. Bitte neu hochladen."})
+            if not cv_pfad:
+                return self._senden(400, {"fehler": "Bitte zuerst oben deinen Lebenslauf hochladen."})
             with sperre:
                 if bewerbungen.get(key, {}).get("status") == "laeuft":
                     return self._senden(200, {"ok": True})
                 bewerbungen[key] = {"status": "laeuft", "meldung": "Starte …"}
-            threading.Thread(target=bewerbung_erstellen, args=(key, stelle, suche["lebenslauf"]),
+            threading.Thread(target=bewerbung_erstellen, args=(key, stelle, cv, kennung),
                              daemon=True).start()
             return self._senden(200, {"ok": True})
         self._senden(404, {"fehler": "nicht gefunden"})
