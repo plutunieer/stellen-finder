@@ -61,7 +61,7 @@ def _pensum(von, bis):
 def _jobcloud(portal, domain, stichwort, ort):
     q = {"query": stichwort, "rows": PRO_ABFRAGE}
     if ort:
-        q["location"] = ort
+        q["location"] = _jobcloud_ort(ort)
     daten = json.loads(_holen(f"https://www.{domain}/api/v1/public/search?"
                               + urllib.parse.urlencode(q)))
     stellen = []
@@ -101,16 +101,46 @@ KANTON_NAMEN = {
     "TI": "Tessin", "UR": "Uri", "VD": "Waadt", "VS": "Wallis", "ZG": "Zug", "ZH": "Zürich"}
 
 
+# Andere Schreibweisen derselben Kantone (fr/it/kurz), fuer den LinkedIn-Filter.
+KANTON_ANDERE = {
+    "SG": ["St. Gallen"], "GE": ["Genève", "Geneva"], "FR": ["Fribourg"],
+    "NE": ["Neuchâtel"], "TI": ["Ticino"], "VD": ["Vaud"], "VS": ["Valais"],
+    "AI": ["Appenzell"], "BL": ["Basel-Land"], "GR": ["Grisons", "Graubunden"]}
+
+
+def _kanton_code(ort):
+    for code, name in KANTON_NAMEN.items():
+        if ort.strip().lower() in (name.lower(), code.lower()):
+            return code
+    return None
+
+
+# Wo jobs.ch/jobup.ch mit dem deutschen Namen fast nichts finden (gemessen
+# 15.10.2026, Stichwort „Verkauf“: „Sankt Gallen“ 1 Seite, „St. Gallen“ 36).
+JOBCLOUD_ORT = {"SG": "St. Gallen", "GE": "Genève", "FR": "Fribourg",
+                "NE": "Neuchâtel", "AI": "Appenzell"}
+
+
+def _jobcloud_ort(ort):
+    return JOBCLOUD_ORT.get(_kanton_code(ort or ""), ort)
+
+
 def _linkedin(stichwort, ort):
     try:
         kanton = KANTON_NAMEN.get(_kanton(ort)) if ort else None
     except Exception:
         kanton = None     # Ort bei Job-Room unbekannt: LinkedIn ungefiltert
-    stellen = _linkedin_roh(stichwort, f"Kanton {kanton}" if kanton else ort)
-    if kanton:
-        muster = re.compile(rf"\b{re.escape(kanton.lower())}\b")
-        stellen = [s for s in stellen if muster.search(s["ort"].lower())]
-    return stellen
+    if not kanton:
+        return _linkedin_roh(stichwort, ort)
+    code = _kanton_code(kanton)
+    namen = [kanton] + KANTON_ANDERE.get(code, [])
+    muster = re.compile(r"\b(" + "|".join(re.escape(n.lower()) for n in namen) + r")\b(?! ausserrhoden)")
+    # „Kanton Genf“ kennt LinkedIn nicht, „Genève, Schweiz“ schon: der Reihe nach probieren.
+    for anfrage in [f"Kanton {kanton}"] + namen:
+        stellen = [s for s in _linkedin_roh(stichwort, anfrage) if muster.search(s["ort"].lower())]
+        if stellen:
+            return stellen
+    return []
 
 
 def _linkedin_roh(stichwort, ort):
@@ -154,6 +184,9 @@ _kantone = {}
 def _kanton(ort):
     if not ort:
         return None
+    code = _kanton_code(ort)                  # Auswahl auf der Seite = Kantonsname
+    if code:
+        return code
     if ort not in _kantone:
         d = json.loads(_holen(
             "https://www.job-room.ch/referenceservice/api/_search/localities?"

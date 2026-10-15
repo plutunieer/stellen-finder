@@ -50,7 +50,7 @@ button:disabled{opacity:.55;cursor:wait}
 <div class="karte">
   <div class="felder">
     <div><label for="stichworte">Stichworte</label><input id="stichworte" placeholder="z. B. Integration, Projektleitung"></div>
-    <div><label for="ort">Ort / Region (leer = ganze Schweiz)</label><input id="ort" placeholder="z. B. Luzern"></div>
+    <div><label for="ort">Region</label><select id="ort"><option value="">Ganze Schweiz</option><option value="Aargau">Kanton Aargau</option><option value="Appenzell Ausserrhoden">Kanton Appenzell Ausserrhoden</option><option value="Appenzell Innerrhoden">Kanton Appenzell Innerrhoden</option><option value="Basel-Landschaft">Kanton Basel-Landschaft</option><option value="Basel-Stadt">Kanton Basel-Stadt</option><option value="Bern">Kanton Bern</option><option value="Freiburg">Kanton Freiburg</option><option value="Genf">Kanton Genf</option><option value="Glarus">Kanton Glarus</option><option value="Graubünden">Kanton Graubünden</option><option value="Jura">Kanton Jura</option><option value="Luzern">Kanton Luzern</option><option value="Neuenburg">Kanton Neuenburg</option><option value="Nidwalden">Kanton Nidwalden</option><option value="Obwalden">Kanton Obwalden</option><option value="Sankt Gallen">Kanton Sankt Gallen</option><option value="Schaffhausen">Kanton Schaffhausen</option><option value="Schwyz">Kanton Schwyz</option><option value="Solothurn">Kanton Solothurn</option><option value="Tessin">Kanton Tessin</option><option value="Thurgau">Kanton Thurgau</option><option value="Uri">Kanton Uri</option><option value="Waadt">Kanton Waadt</option><option value="Wallis">Kanton Wallis</option><option value="Zug">Kanton Zug</option><option value="Zürich">Kanton Zürich</option></select></div>
     <div><label>Pensum %</label><div class="pensum"><input id="von" type="number" min="0" max="100" value="60"> – <input id="bis" type="number" min="0" max="100" value="100"></div></div>
     <div class="breit"><label for="cv">Lebenslauf (freiwillig: für die Passung und die Bewerbung, Word oder PDF)</label>
       <input id="cv" type="file" accept=".docx,.pdf"><div class="leise" id="cv-name"></div></div>
@@ -103,6 +103,7 @@ async function laden() {
   cvAnzeigen();
   try { const g = localStorage.getItem("eingabe"); if (g) { const e = JSON.parse(g);
     $("#stichworte").value = e.stichworte || ""; $("#ort").value = e.ort || "";
+    if ($("#ort").selectedIndex < 0) $("#ort").value = "";   // alter Freitext-Wert
     $("#von").value = e.pensum_von ?? 60; $("#bis").value = e.pensum_bis ?? 100; } } catch (e) {}
   aktualisieren();
 }
