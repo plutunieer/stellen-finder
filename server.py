@@ -156,10 +156,10 @@ def _melden(text):
     zustand["meldung"] = text
 
 
-def _bewerten(cv, paket):
+def _bewerten(cv, paket, erfahrung="egal"):
     """Faellt ein Claude-Lauf aus, bleiben die Stellen trotzdem in der Liste."""
     try:
-        return ki.bewerten(cv, paket)
+        return ki.bewerten(cv, paket, erfahrung)
     except Exception as e:
         print("Bewertung fehlgeschlagen:", repr(e))
         return {s["key"]: (0, "nicht bewertet (Claude-Fehler)") for s in paket}
@@ -176,11 +176,96 @@ def _auswahl(stellen, stichworte):
     return auswahl
 
 
+UMKREIS_KM = (10, 20, 30, 50)
+ERFAHRUNG = {"egal": "", "einsteiger": "Einsteiger / Quereinsteiger",
+             "junior": "Junior", "erfahren": "Erfahren"}
+# Titel, die klar Erfahrung oder Fuehrung verlangen („Begleiter“ ist keine Leitung).
+FUER_ERFAHRENE = re.compile(
+    r"\b(senior|head|director|direktor(in)?|principal|kader|vice president|lead|team ?lead)\b"
+    r"|\bsr\.(?=\s)|\bchef(in)?\b(?! de (rang|partie|cuisine))"
+    r"|\b\w*(?<!beg)(?<!halb)leiter(in|innen)?\b|\b\w*leitung\b"
+    r"|key[ -]?account|geschäftsführer", re.I)
+# „Assistenz der Geschäftsleitung“ ist keine Fuehrungsstelle.
+KEINE_FUEHRUNG = re.compile(r"assist|sekretär|sekretar|sachbearbeit", re.I)
+FUER_EINSTEIGER = re.compile(
+    r"junior|einsteiger|quereinsteig|trainee|\bprakti(kum|kant)(in)?\b|"
+    r"ohne (berufs)?erfahrung|keine (berufs)?erfahrung|"
+    r"erfahrung (ist )?nicht (zwingend|nötig|notwendig)", re.I)
+MAX_STICHWORTE = 8
+MAX_AUSGEBLENDET = 300
+
+
+def _gebiet(eingabe):
+    """Eingabe der Seite -> geprueftes Gebiet und Text fuer die Anzeige."""
+    art = str(eingabe.get("region") or "schweiz")
+    if art == "kantone":
+        codes = []
+        liste = eingabe.get("kantone")
+        for name in liste if isinstance(liste, list) else []:
+            code = portale._kanton_code(str(name))
+            if code and code not in codes:
+                codes.append(code)
+        if not codes:
+            raise RuntimeError("Bitte mindestens einen Kanton anhaken.")
+        return {"art": "kantone", "codes": codes}, ", ".join(portale.KANTON_NAMEN[c] for c in codes)
+    if art == "umkreis":
+        ort = str(eingabe.get("umkreis_ort") or "").strip()[:80]
+        try:
+            km = int(eingabe.get("umkreis_km") or 0)
+        except (TypeError, ValueError):
+            km = 0
+        if not ort:
+            raise RuntimeError("Bitte für den Umkreis einen Ort oder eine PLZ eingeben.")
+        if km not in UMKREIS_KM:
+            raise RuntimeError("Ungültiger Umkreis.")
+        try:
+            treffer = portale.ort_suchen(ort)
+        except Exception:
+            raise RuntimeError("Das Ortsverzeichnis (Job-Room) ist gerade nicht erreichbar.") from None
+        t = treffer and ((treffer["genau"] or [None])[0] or treffer["erster"])
+        if not t:
+            raise RuntimeError(f"Ort „{ort}“ nicht gefunden. Bitte anders schreiben oder die PLZ nehmen.")
+        g = t["geoPoint"]
+        return ({"art": "umkreis", "ort": t["city"], "km": km, "lat": float(g["lat"]),
+                 "lon": float(g["lon"]), "kanton": t.get("cantonCode")},
+                f"{km} km um {t['city']}")
+    return {"art": "schweiz"}, "ganze Schweiz"
+
+
+def _woerter(text):
+    return [w.strip().lower() for w in re.split(r"[,;\n]", str(text or "")) if w.strip()][:20]
+
+
+def _filtern(stellen, erfahrung, ohne):
+    """Teilt in (bleiben, ausgeblendet). Jede ausgeblendete Stelle sagt, warum."""
+    bleiben, weg = [], []
+    muster = [(w, re.compile(r"(?<!\w)" + re.escape(w), re.I)) for w in ohne]   # Wortanfang
+    for s in stellen:
+        inhalt = f'{s["titel"]} {s.get("vorschau") or ""}'
+        wort = next((w for w, m in muster if m.search(inhalt)), None)
+        titel = s["titel"]
+        if wort:
+            s["warum"] = f"„{wort}“"
+        elif (erfahrung in ("einsteiger", "junior") and FUER_ERFAHRENE.search(titel)
+              and not FUER_EINSTEIGER.search(titel) and not KEINE_FUEHRUNG.search(titel)):
+            s["warum"] = "für Erfahrene"
+        else:
+            s["einsteiger"] = (erfahrung in ("einsteiger", "junior")
+                               and bool(FUER_EINSTEIGER.search(inhalt)))
+            bleiben.append(s)
+            continue
+        if len(weg) < MAX_AUSGEBLENDET:   # schlank: nur was die Seite anzeigt
+            weg.append({k: s.get(k) for k in ("key", "titel", "firma", "ort", "portal",
+                                              "km", "link", "warum")})
+    return bleiben, weg
+
+
 def suche_starten(eingabe):
     global suche
     try:
         # Der Lebenslauf ist fuer die Suche freiwillig: ohne ihn gibt es alle
         # Treffer (neueste zuerst), mit ihm bewertet Claude die Passung.
+        gebiet, ort = _gebiet(eingabe)        # Eingabefehler sofort, nicht erst nach Claude
         _, _, cv = _aktueller_cv(text=True)
         stichworte = [s.strip() for s in re.split(r"[,;\n]", str(eingabe.get("stichworte", ""))) if s.strip()]
         if not stichworte:
@@ -189,20 +274,26 @@ def suche_starten(eingabe):
                                    "Mit hochgeladenem Lebenslauf wählt Claude die Stichworte selbst.")
             _melden("Claude leitet Suchbegriffe aus dem Lebenslauf ab …")
             stichworte = ki.suchbegriffe(cv)
-        stichworte = list({w.lower(): w for w in stichworte}.values())
-        ort = str(eingabe.get("ort", "")).strip()
+        stichworte = list({w.lower(): w for w in stichworte}.values())[:MAX_STICHWORTE]
+        erfahrung = str(eingabe.get("erfahrung") or "egal")
+        if erfahrung not in ERFAHRUNG:
+            erfahrung = "egal"
+        ohne = _woerter(eingabe.get("ohne"))
         von, bis = int(eingabe.get("pensum_von") or 0), int(eingabe.get("pensum_bis") or 100)
-        stellen, fehler = portale.suchen(stichworte, ort, von, bis, _melden)
+        stellen, fehler = portale.suchen(stichworte, gebiet, von, bis, _melden)
         if not stellen:
             raise RuntimeError("Keine Stellen gefunden. " + "; ".join(fehler))
-        stellen = _auswahl(stellen, stichworte)
-        if cv:
+        stellen, ausgeblendet = _filtern(_auswahl(stellen, stichworte), erfahrung, ohne)
+        # Einsteiger-Stellen zuerst: sie kommen sicher in die Bewertung und stehen
+        # ohne Lebenslauf oben (sort ist stabil, die Reihenfolge sonst bleibt).
+        stellen.sort(key=lambda s: not s.get("einsteiger"))
+        if cv and stellen:
             stellen = stellen[:MAX_BEWERTEN]
             _melden(f"Claude prüft {len(stellen)} Stellen gegen deinen Lebenslauf (1–3 Min.) …")
             pakete = [stellen[i:i + PRO_KI_LAUF] for i in range(0, len(stellen), PRO_KI_LAUF)]
             punkte = {}
             with ThreadPoolExecutor(min(len(pakete), KI_GLEICHZEITIG)) as pool:
-                for teil in pool.map(lambda p: _bewerten(cv, p), pakete):
+                for teil in pool.map(lambda p: _bewerten(cv, p, erfahrung), pakete):
                     punkte.update(teil)
             for s in stellen:
                 s["punkte"], s["grund"] = punkte.get(s["key"], (0, "nicht bewertet"))
@@ -210,10 +301,11 @@ def suche_starten(eingabe):
         else:
             for s in stellen:
                 s["punkte"], s["grund"] = None, ""
-            stellen.sort(key=lambda s: s.get("datum") or "", reverse=True)
-        suche = {"zeit": time.strftime("%d.%m.%Y %H:%M"), "bewertet": bool(cv),
+            stellen.sort(key=lambda s: (bool(s.get("einsteiger")), s.get("datum") or ""), reverse=True)
+        suche = {"zeit": time.strftime("%d.%m.%Y %H:%M"), "bewertet": bool(cv and stellen),
                  "stichworte": stichworte, "ort": ort, "pensum": [von, bis],
-                 "stellen": stellen, "portal_fehler": fehler}
+                 "erfahrung": ERFAHRUNG[erfahrung], "ohne": ohne,
+                 "stellen": stellen, "ausgeblendet": ausgeblendet, "portal_fehler": fehler}
         _speichern()
         _bewerbungen_laden()
         zustand["fehler"] = None

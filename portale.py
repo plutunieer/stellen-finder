@@ -12,7 +12,9 @@ link, vorschau (kurzer Text) und optional text (voller Inseratetext).
 
 import html
 import json
+import math
 import re
+import threading
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +23,8 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130 Safari/537.36")
 ZEITLIMIT = 25
 PRO_ABFRAGE = 20        # jobs.ch/jobup.ch geben hoechstens 20 je Seite heraus
-MAX_PRO_PORTAL = 300    # Treffer je Portal und Stichwort (alle Seiten zusammen)
+MAX_PRO_PORTAL = 300    # Treffer je Portal, Stichwort und Kanton
+SEITEN_GESAMT = 30       # jobs.ch/jobup.ch: Seiten je Stichwort ueber alle Kantone
 LINKEDIN_SEITEN = 5     # je 10 Treffer; LinkedIn sperrt bei vielen Abfragen (429)
 
 
@@ -61,11 +64,11 @@ def _pensum(von, bis):
 
 # --- jobs.ch / jobup.ch -------------------------------------------------------
 
-def _jobcloud(portal, domain, stichwort, ort):
+def _jobcloud_seiten(domain, stichwort, ort, max_seiten=MAX_PRO_PORTAL // PRO_ABFRAGE):
     """Alle Ergebnisseiten (je 20) bis MAX_PRO_PORTAL, gleichzeitig abgerufen."""
     q = {"query": stichwort, "rows": PRO_ABFRAGE}
     if ort:
-        q["location"] = _jobcloud_ort(ort)
+        q["location"] = ort
     seite = lambda nr: json.loads(_holen(f"https://www.{domain}/api/v1/public/search?"
                                          + urllib.parse.urlencode({**q, "page": nr})))
     def seite_sicher(nr):          # eine kaputte Seite kostet nur ihre 20 Treffer
@@ -75,18 +78,49 @@ def _jobcloud(portal, domain, stichwort, ort):
             return {}
 
     erste = seite(1)
-    letzte = min(int(erste.get("num_pages") or 1), MAX_PRO_PORTAL // PRO_ABFRAGE)
+    letzte = min(int(erste.get("num_pages") or 1), max_seiten)
     dokumente = list(erste.get("documents", []))
     if letzte > 1:
         with ThreadPoolExecutor(6) as pool:
             for daten in pool.map(seite_sicher, range(2, letzte + 1)):
                 dokumente += daten.get("documents", [])
+    return dokumente
+
+
+def _jobcloud(portal, domain, stichwort, gebiet):
+    if gebiet["art"] == "schweiz":
+        orte = [None]
+    else:
+        # Umkreis: alle Kantone, die den Kreis beruehren koennen; genau gefiltert
+        # wird danach ueber die Koordinaten jeder Stelle.
+        codes = gebiet["codes"] if gebiet["art"] == "kantone" else _kantone_im_umkreis(gebiet)
+        orte = [JOBCLOUD_ORT.get(c, KANTON_NAMEN[c]) for c in codes]
+    # Viele Kantone: weniger Seiten je Kanton, damit eine Suche nicht Hunderte
+    # Abfragen ausloest. Beim Umkreis bekommt der Kanton des Orts alle Seiten,
+    # die Nachbarkantone teilen sich den Rest.
+    voll = MAX_PRO_PORTAL // PRO_ABFRAGE
+    if gebiet["art"] == "umkreis":
+        nachbarn = max(1, len(orte) - 1)
+        seiten = [voll if c == gebiet["kanton"] else max(2, SEITEN_GESAMT // nachbarn) for c in codes]
+    else:
+        seiten = [max(1, min(voll, SEITEN_GESAMT // len(orte)))] * len(orte)
+    dokumente, fehler = [], None
+    for ort, je_kanton in zip(orte, seiten):
+        try:
+            dokumente += _jobcloud_seiten(domain, stichwort, ort, je_kanton)
+        except Exception as e:     # ein Kanton faellt aus, die anderen bleiben
+            fehler = e
+    if fehler and not dokumente:
+        raise fehler
+    if gebiet["art"] == "kantone":
+        dokumente = _nur_kantone(dokumente, gebiet["codes"])
     stellen = []
     for d in dokumente:
         grade = d.get("employment_grades") or []
         link = (d.get("_links", {}).get("detail_de")
                 or d.get("_links", {}).get("detail_fr")
                 or d.get("_links", {}).get("detail_en") or {}).get("href", "")
+        k = d.get("coordinates") or {}
         stellen.append({
             "key": f"{portal}:{d['job_id']}", "portal": portal,
             "titel": d.get("title", ""), "firma": d.get("company_name", ""),
@@ -94,8 +128,33 @@ def _jobcloud(portal, domain, stichwort, ort):
             "pensum": _pensum(min(grade), max(grade)) if grade else None,
             "datum": (d.get("publication_date") or "")[:10],
             "link": _sicher(link), "vorschau": (d.get("preview") or "")[:400],
+            "punkt": _punkt(k.get("lat"), k.get("lon")),
         })
     return stellen
+
+
+def _nur_kantone(dokumente, codes):
+    """jobs.ch nimmt den Kanton ungenau (bei „Luzern“ auch Zuerich oder Basel).
+    Weg faellt nur, was eindeutig woanders liegt: Ortsname genau bekannt, in
+    einem anderen Kanton, und kein gewaehlter Kanton im Ortstext genannt."""
+    namen = [n.lower() for c in codes for n in [KANTON_NAMEN[c]] + KANTON_ANDERE.get(c, [])]
+    erste = lambda d: re.split(r"[,/(]| - ", d.get("place") or "")[0].strip()
+    orte = {erste(d) for d in dokumente}
+    def kanton(ort):
+        try:
+            e = ort_suchen(ort)
+        except Exception:
+            return None
+        genau = (e or {}).get("genau") or []
+        return {g.get("cantonCode") for g in genau} if genau else None
+    with ThreadPoolExecutor(6) as pool:
+        kantone = dict(zip(orte, pool.map(kanton, orte)))
+    def drin(d):
+        k = kantone.get(erste(d))
+        if not k or k & set(codes):
+            return True
+        return any(n in (d.get("place") or "").lower() for n in namen)
+    return [d for d in dokumente if drin(d)]
 
 
 def _jobcloud_text(domain, job_id):
@@ -125,9 +184,15 @@ KANTON_ANDERE = {
     "AI": ["Appenzell"], "BL": ["Basel-Land"], "GR": ["Grisons", "Graubunden"]}
 
 
+KANTON_ENGLISCH = {"LU": ["Lucerne"], "ZH": ["Zurich"], "BE": ["Berne"],
+                   "GR": ["Graubuenden"], "ZG": ["Zoug"], "SG": ["Saint Gallen"]}
+
+
 def _kanton_code(ort):
+    ort = ort.strip().lower()
     for code, name in KANTON_NAMEN.items():
-        if ort.strip().lower() in (name.lower(), code.lower()):
+        namen = [name, code] + KANTON_ANDERE.get(code, []) + KANTON_ENGLISCH.get(code, [])
+        if ort in (n.lower() for n in namen):
             return code
     return None
 
@@ -138,18 +203,35 @@ JOBCLOUD_ORT = {"SG": "St. Gallen", "GE": "Genève", "FR": "Fribourg",
                 "NE": "Neuchâtel", "AI": "Appenzell"}
 
 
-def _jobcloud_ort(ort):
-    return JOBCLOUD_ORT.get(_kanton_code(ort or ""), ort)
+def _linkedin(stichwort, gebiet):
+    if gebiet["art"] == "schweiz":
+        return _linkedin_roh(stichwort, None, LINKEDIN_SEITEN)
+    if gebiet["art"] == "umkreis":
+        # LinkedIn kennt keinen genauen Umkreis: Ort abfragen, dann jede Stelle
+        # ueber ihren Ortsnamen verorten. Unbekannter Ort = Stelle faellt weg.
+        stellen = _linkedin_roh(stichwort, gebiet["ort"], LINKEDIN_SEITEN,
+                                distanz=round(gebiet["km"] / 1.6) + 5)
+        orte = {s["ort"] for s in stellen}
+        with ThreadPoolExecutor(6) as pool:
+            punkte = dict(zip(orte, pool.map(_linkedin_punkt, orte)))
+        for s in stellen:
+            s["punkt"] = punkte.get(s["ort"])
+        return stellen
+    stellen, fehler = [], None
+    # LinkedIn sperrt bei vielen Abfragen: je mehr Kantone, desto weniger Seiten.
+    seiten = max(1, LINKEDIN_SEITEN // len(gebiet["codes"]))
+    for code in gebiet["codes"]:
+        try:
+            stellen += _linkedin_kanton(stichwort, code, seiten)
+        except Exception as e:
+            fehler = e
+    if fehler and not stellen:
+        raise fehler
+    return stellen
 
 
-def _linkedin(stichwort, ort):
-    try:
-        kanton = KANTON_NAMEN.get(_kanton(ort)) if ort else None
-    except Exception:
-        kanton = None     # Ort bei Job-Room unbekannt: LinkedIn ungefiltert
-    if not kanton:
-        return _linkedin_roh(stichwort, ort, LINKEDIN_SEITEN)
-    code = _kanton_code(kanton)
+def _linkedin_kanton(stichwort, code, seiten=LINKEDIN_SEITEN):
+    kanton = KANTON_NAMEN[code]
     namen = [kanton] + KANTON_ANDERE.get(code, [])
     muster = re.compile(r"\b(" + "|".join(re.escape(n.lower()) for n in namen) + r")\b(?! ausserrhoden)")
     # „Kanton Genf“ kennt LinkedIn nicht, „Genève, Schweiz“ schon: der Reihe nach probieren.
@@ -159,7 +241,7 @@ def _linkedin(stichwort, ort):
             # Diese Schreibweise funktioniert: die weiteren Seiten dazuholen.
             # Faellt dabei etwas aus, bleiben die Treffer von Seite 1.
             try:
-                mehr = _linkedin_roh(stichwort, anfrage, LINKEDIN_SEITEN, ab=1)
+                mehr = _linkedin_roh(stichwort, anfrage, seiten, ab=1) if seiten > 1 else []
             except Exception:
                 mehr = []
             bekannt = {s["key"] for s in stellen}
@@ -168,8 +250,10 @@ def _linkedin(stichwort, ort):
     return []
 
 
-def _linkedin_roh(stichwort, ort, seiten=1, ab=0):
+def _linkedin_roh(stichwort, ort, seiten=1, ab=0, distanz=None):
     q = {"keywords": stichwort, "location": f"{ort}, Schweiz" if ort else "Schweiz"}
+    if distanz:
+        q["distance"] = distanz     # Meilen
     karten = []
     for nr in range(ab, seiten):
         try:
@@ -217,35 +301,110 @@ def _linkedin_text(job_id):
 
 # --- Job-Room (Bund/RAV) ------------------------------------------------------
 
-_kantone = {}
+# --- Orte und Umkreis ---------------------------------------------------------
 
-
-def _kanton(ort):
-    if not ort:
+def _punkt(lat, lon):
+    try:
+        return (float(lat), float(lon))
+    except (TypeError, ValueError):
         return None
-    code = _kanton_code(ort)                  # Auswahl auf der Seite = Kantonsname
-    if code:
-        return code
-    if ort not in _kantone:
-        d = json.loads(_holen(
-            "https://www.job-room.ch/referenceservice/api/_search/localities?"
-            + urllib.parse.urlencode({"prefix": ort, "resultSize": 1,
-                                      "distinctLocalities": "true"})))
-        treffer = d.get("localities") or []
-        if not treffer:
-            # Lieber auslassen als still die ganze Schweiz liefern.
-            raise RuntimeError(f"Ort „{ort}“ bei Job-Room unbekannt")
-        _kantone[ort] = treffer[0]["cantonCode"]
-    return _kantone[ort]
 
 
-def _jobroom(stichwort, ort):
-    kanton = _kanton(ort)
-    anfrage = {"keywords": [stichwort], "cantonCodes": [kanton] if kanton else [],
+def entfernung(a, b):
+    """Luftlinie in km (genau genug fuer die Schweiz)."""
+    lat = math.radians((a[0] + b[0]) / 2)
+    return math.hypot((a[0] - b[0]) * 111.2, (a[1] - b[1]) * 111.2 * math.cos(lat))
+
+
+_orte = {}
+_orte_sperre = threading.Lock()
+# Englische Namen, wie LinkedIn sie schreibt.
+ORT_ENGLISCH = {"geneva": "Genève", "lucerne": "Luzern", "zurich": "Zürich",
+                "berne": "Bern", "basle": "Basel", "fribourg": "Fribourg"}
+
+
+def _norm(t):
+    t = (t or "").lower().strip()
+    for a, b in (("ä", "a"), ("ö", "o"), ("ü", "u"), ("é", "e"), ("è", "e"), ("â", "a")):
+        t = t.replace(a, b)
+    return re.sub(r"\s*\(.*?\)|[^a-z0-9. ]", "", t).strip()
+
+
+def ort_suchen(name):
+    """Ort oder PLZ ueber das Ortsverzeichnis von Job-Room. Liefert
+    {"genau": [Treffer mit gleichem Namen], "erster": erster Treffer} — oder None."""
+    name = (name or "").strip()[:80]
+    schluessel = _norm(name)
+    if not schluessel:
+        return None
+    with _orte_sperre:
+        if schluessel in _orte:
+            return _orte[schluessel]
+    d = json.loads(_holen(
+        "https://www.job-room.ch/referenceservice/api/_search/localities?"
+        + urllib.parse.urlencode({"prefix": name, "resultSize": 10,
+                                  "distinctLocalities": "true"})))
+    treffer = [t for t in d.get("localities") or []
+               if _punkt(*[(t.get("geoPoint") or {}).get(x) for x in ("lat", "lon")]) and t.get("city")]
+    # „Buchs AG“ zaehlt als genauer Treffer fuer „Buchs“.
+    genau = [t for t in treffer if re.fullmatch(re.escape(schluessel) + r"( [a-z]{2})?", _norm(t.get("city")))]
+    ergebnis = {"genau": genau, "erster": treffer[0] if treffer else None}
+    with _orte_sperre:
+        if len(_orte) > 2000:
+            _orte.clear()
+        _orte[schluessel] = ergebnis
+    return ergebnis
+
+
+def _linkedin_punkt(ort):
+    """„Emmen, Luzern, Schweiz“ -> Koordinaten. Gleichnamige Orte (Buchs AG/SG)
+    werden ueber den Kanton im zweiten Teil unterschieden. Unklar = None."""
+    teile = [x.strip() for x in ort.split(",")]
+    name = ORT_ENGLISCH.get(_norm(teile[0]), teile[0])
+    try:
+        e = ort_suchen(name)
+    except Exception:
+        return None
+    kandidaten = (e or {}).get("genau") or []
+    kanton = _kanton_code(teile[1]) if len(teile) > 2 else None
+    if kanton:
+        kandidaten = [k for k in kandidaten if k.get("cantonCode") == kanton]
+    if not kandidaten:
+        return None
+    g = kandidaten[0]["geoPoint"]
+    return _punkt(g["lat"], g["lon"])
+
+
+# Ungefaehre Kantonsmitte und groesste Entfernung von dort bis zur Grenze (km).
+# Nur fuer die Frage „kann der Umkreis diesen Kanton beruehren?“ — grosszuegig.
+KANTON_MITTE = {
+    "AG": (47.41, 8.15, 35), "AI": (47.32, 9.42, 15), "AR": (47.37, 9.30, 25),
+    "BE": (46.82, 7.63, 80), "BL": (47.45, 7.70, 30), "BS": (47.56, 7.60, 8),
+    "FR": (46.72, 7.08, 40), "GE": (46.20, 6.14, 20), "GL": (46.98, 9.07, 30),
+    "GR": (46.66, 9.63, 95), "JU": (47.35, 7.15, 35), "LU": (47.07, 8.11, 40),
+    "NE": (47.00, 6.78, 35), "NW": (46.93, 8.39, 18), "OW": (46.85, 8.20, 25),
+    "SG": (47.23, 9.27, 55), "SH": (47.71, 8.59, 25), "SO": (47.30, 7.64, 45),
+    "SZ": (47.06, 8.75, 35), "TG": (47.57, 9.10, 35), "TI": (46.30, 8.80, 65),
+    "UR": (46.77, 8.63, 35), "VD": (46.57, 6.55, 65), "VS": (46.21, 7.61, 90),
+    "ZG": (47.16, 8.52, 15), "ZH": (47.42, 8.65, 40)}
+
+
+def _kantone_im_umkreis(gebiet):
+    mitte = (gebiet["lat"], gebiet["lon"])
+    return [c for c, (lat, lon, weite) in KANTON_MITTE.items()
+            if c == gebiet["kanton"] or entfernung(mitte, (lat, lon)) <= gebiet["km"] + weite]
+
+
+def _jobroom(stichwort, gebiet):
+    umkreis = None
+    if gebiet["art"] == "umkreis":
+        umkreis = {"geoPoint": {"lat": gebiet["lat"], "lon": gebiet["lon"]}, "distance": gebiet["km"]}
+    anfrage = {"keywords": [stichwort],
+               "cantonCodes": gebiet["codes"] if gebiet["art"] == "kantone" else [],
                "workloadPercentageMin": 0, "workloadPercentageMax": 100,
                "permanent": None, "companyName": None, "onlineSince": 60,
                "displayRestricted": False, "professionCodes": [],
-               "communalCodes": [], "radiusSearchRequest": None}
+               "communalCodes": [], "radiusSearchRequest": umkreis}
     daten = []
     for seite in range(MAX_PRO_PORTAL // 100):
         teil = json.loads(_holen(
@@ -267,13 +426,15 @@ def _jobroom(stichwort, ort):
             link = "https://" + link
         e = c.get("employment") or {}
         link = _sicher(link)
+        ort = c.get("location") or {}
         stellen.append({
             "key": f"jobroom:{a.get('id')}", "portal": "jobroom",
             "titel": titel, "firma": (c.get("company") or {}).get("name", ""),
-            "ort": (c.get("location") or {}).get("city", ""),
+            "ort": ort.get("city", ""),
             "pensum": _pensum(e.get("workloadPercentageMin"), e.get("workloadPercentageMax")),
             "datum": (a.get("createdTime") or "")[:10], "link": link,
             "vorschau": text[:400], "text": text,
+            "punkt": _punkt(*[(ort.get("coordinates") or {}).get(x) for x in ("lat", "lon")]),
         })
     return stellen
 
@@ -308,11 +469,13 @@ def _schluessel(stelle):
     return norm(titel)[:40] + "|" + norm(stelle["firma"])[:20] + "|" + ort[:15]
 
 
-def suchen(stichworte, ort, pensum_von, pensum_bis, melden=lambda t: None):
-    """Alle Portale x alle Stichworte. Liefert (stellen, fehler)."""
+def suchen(stichworte, gebiet, pensum_von, pensum_bis, melden=lambda t: None):
+    """Alle Portale x alle Stichworte. Liefert (stellen, fehler).
+    gebiet: {"art": "schweiz"} | {"art": "kantone", "codes": [...]}
+          | {"art": "umkreis", "ort", "km", "lat", "lon", "kanton"}"""
     def holen(name, stichwort):
         try:
-            return PORTALE[name](stichwort, ort), None
+            return PORTALE[name](stichwort, gebiet), None
         except Exception as e:
             grund = str(e) if isinstance(e, RuntimeError) else type(e).__name__
             return [], f"{name} ({stichwort}): {grund}"
@@ -328,6 +491,13 @@ def suchen(stichworte, ort, pensum_von, pensum_bis, melden=lambda t: None):
             if fehlertext:
                 fehler.append(fehlertext)
             for s in gefunden:
+                if gebiet["art"] == "umkreis":
+                    if not s.get("punkt"):
+                        continue          # Ort unbekannt: lieber weglassen
+                    s["km"] = round(entfernung((gebiet["lat"], gebiet["lon"]), s["punkt"]))
+                    if s["km"] > gebiet["km"]:
+                        continue
+                s.pop("punkt", None)
                 p = s.get("pensum")
                 if p and (p[1] < pensum_von or p[0] > pensum_bis):
                     continue

@@ -7,6 +7,7 @@
 <style>
 :root{--ink:#14213d;--leise:#55617a;--rand:#d9e2ef;--blau:#cfe0f7;--blau-dunkel:#1f4e8c;--gruen:#dff3e8;--gelb:#fff3d6;--rot:#fde3e6}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;background:#f4f7fb;color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 main{max-width:980px;margin:0 auto;padding:24px 16px 60px}
 h1{font-size:24px;margin:0 0 4px}
@@ -38,8 +39,17 @@ button:disabled{opacity:.55;cursor:wait}
 .dok{border:1px solid var(--rand);border-radius:8px;padding:12px;background:#fbfcfe;max-height:520px;overflow:auto;white-space:pre-wrap;font-size:13.5px}
 .dok h3{margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;gap:8px;white-space:normal}
 .dok h3 a{font-size:12px;padding:4px 10px}
+.reiter{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.reiter button{background:#fff;font-weight:600}
+.reiter button.an{background:var(--blau);border-color:var(--blau-dunkel)}
+.kantone{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:4px 10px}
+.kantone label{display:flex;gap:6px;align-items:center;font-weight:500;color:var(--ink);margin:0}
+.kantone input{width:auto}
+.umkreis{display:grid;grid-template-columns:2fr 1fr;gap:10px}
+.marke{display:inline-block;background:var(--gruen);border:1px solid #9fd3b4;border-radius:6px;padding:0 6px;font-size:12px;font-weight:700;margin-left:6px;vertical-align:2px}
+.weg{opacity:.7}
 .mehr{background:none;border:0;color:var(--blau-dunkel);text-decoration:underline;font-weight:600;padding:0}
-@media (max-width:700px){.felder,.spalten{grid-template-columns:1fr}.stelle{grid-template-columns:44px 1fr}.punkte{width:44px;height:44px;font-size:15px}.aktionen{grid-column:1/-1}}
+@media (max-width:700px){.felder,.spalten,.umkreis{grid-template-columns:1fr}.stelle{grid-template-columns:44px 1fr}.punkte{width:44px;height:44px;font-size:15px}.aktionen{grid-column:1/-1}}
 </style>
 </head>
 <body>
@@ -50,8 +60,21 @@ button:disabled{opacity:.55;cursor:wait}
 <div class="karte">
   <div class="felder">
     <div><label for="stichworte">Stichworte</label><input id="stichworte" placeholder="z. B. Integration, Projektleitung"></div>
-    <div><label for="ort">Region</label><select id="ort"><option value="">Ganze Schweiz</option><option value="Aargau">Kanton Aargau</option><option value="Appenzell Ausserrhoden">Kanton Appenzell Ausserrhoden</option><option value="Appenzell Innerrhoden">Kanton Appenzell Innerrhoden</option><option value="Basel-Landschaft">Kanton Basel-Landschaft</option><option value="Basel-Stadt">Kanton Basel-Stadt</option><option value="Bern">Kanton Bern</option><option value="Freiburg">Kanton Freiburg</option><option value="Genf">Kanton Genf</option><option value="Glarus">Kanton Glarus</option><option value="Graubünden">Kanton Graubünden</option><option value="Jura">Kanton Jura</option><option value="Luzern">Kanton Luzern</option><option value="Neuenburg">Kanton Neuenburg</option><option value="Nidwalden">Kanton Nidwalden</option><option value="Obwalden">Kanton Obwalden</option><option value="Sankt Gallen">Kanton Sankt Gallen</option><option value="Schaffhausen">Kanton Schaffhausen</option><option value="Schwyz">Kanton Schwyz</option><option value="Solothurn">Kanton Solothurn</option><option value="Tessin">Kanton Tessin</option><option value="Thurgau">Kanton Thurgau</option><option value="Uri">Kanton Uri</option><option value="Waadt">Kanton Waadt</option><option value="Wallis">Kanton Wallis</option><option value="Zug">Kanton Zug</option><option value="Zürich">Kanton Zürich</option></select></div>
+    <div><label for="erfahrung">Erfahrung</label><select id="erfahrung"><option value="egal">Egal</option><option value="einsteiger">Einsteiger / Quereinsteiger</option><option value="junior">Junior (1–3 Jahre)</option><option value="erfahren">Erfahren</option></select></div>
     <div><label>Pensum %</label><div class="pensum"><input id="von" type="number" min="0" max="100" value="60"> – <input id="bis" type="number" min="0" max="100" value="100"></div></div>
+    <div class="breit"><label>Region</label>
+      <div class="reiter" id="reiter">
+        <button type="button" data-r="schweiz">Ganze Schweiz</button>
+        <button type="button" data-r="kantone">Kantone wählen</button>
+        <button type="button" data-r="umkreis">Umkreis um einen Ort</button>
+      </div>
+      <div id="r-kantone" class="kantone" hidden></div>
+      <div id="r-umkreis" class="umkreis" hidden>
+        <div><label for="umkreis-ort">Ort oder PLZ</label><input id="umkreis-ort" maxlength="80" placeholder="z. B. Emmenbrücke oder 6020"></div>
+        <div><label for="umkreis-km">Umkreis</label><select id="umkreis-km"><option value="10">10 km</option><option value="20">20 km</option><option value="30" selected>30 km</option><option value="50">50 km</option></select></div>
+      </div>
+    </div>
+    <div class="breit"><label for="ohne">Ausschliessen (Wörter, mit Komma getrennt)</label><input id="ohne" placeholder="z. B. Aussendienst, Provision"></div>
     <div class="breit"><label for="cv">Lebenslauf (freiwillig: für die Passung und die Bewerbung, Word oder PDF)</label>
       <input id="cv" type="file" accept=".docx,.pdf"><div class="leise" id="cv-name"></div></div>
   </div>
@@ -66,7 +89,16 @@ button:disabled{opacity:.55;cursor:wait}
 <script>
 const $ = s => document.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-let stand = null, alleZeigen = false, offen = new Set();
+let stand = null, alleZeigen = false, wegZeigen = false, offen = new Set(), region = "schweiz";
+const KANTONE = ["Aargau","Appenzell Ausserrhoden","Appenzell Innerrhoden","Basel-Landschaft","Basel-Stadt","Bern","Freiburg","Genf","Glarus","Graubünden","Jura","Luzern","Neuenburg","Nidwalden","Obwalden","Sankt Gallen","Schaffhausen","Schwyz","Solothurn","Tessin","Thurgau","Uri","Waadt","Wallis","Zug","Zürich"];
+KANTONE.forEach(k => { const l = el("label"); const c = el("input"); c.type = "checkbox"; c.value = k; l.append(c, " " + k); $("#r-kantone").append(l); });
+function regionWaehlen(r) {
+  region = r;
+  document.querySelectorAll("#reiter button").forEach(b => b.classList.toggle("an", b.dataset.r === r));
+  $("#r-kantone").hidden = r !== "kantone"; $("#r-umkreis").hidden = r !== "umkreis";
+}
+document.querySelectorAll("#reiter button").forEach(b => b.onclick = () => regionWaehlen(b.dataset.r));
+const gewaehlt = () => [...document.querySelectorAll("#r-kantone input:checked")].map(c => c.value);
 const timer = {};   // ein Abfrage-Timer pro Stelle, nie mehrere
 
 async function api(pfad, daten) {
@@ -102,9 +134,17 @@ $("#cv").onchange = async () => {
 async function laden() {
   cvAnzeigen();
   try { const g = localStorage.getItem("eingabe"); if (g) { const e = JSON.parse(g);
-    $("#stichworte").value = e.stichworte || ""; $("#ort").value = e.ort || "";
-    if ($("#ort").selectedIndex < 0) $("#ort").value = "";   // alter Freitext-Wert
+    $("#stichworte").value = e.stichworte || "";
+    const alt = e.ort && KANTONE.includes(e.ort) ? [e.ort] : [];   // frueher: ein Kanton
+    const kantone = e.kantone || alt;
+    document.querySelectorAll("#r-kantone input").forEach(c => c.checked = kantone.includes(c.value));
+    regionWaehlen(["schweiz", "kantone", "umkreis"].includes(e.region) ? e.region : alt.length ? "kantone" : "schweiz");
+    $("#umkreis-ort").value = e.umkreis_ort || ""; $("#umkreis-km").value = String(e.umkreis_km || 30);
+    if ($("#umkreis-km").selectedIndex < 0) $("#umkreis-km").value = "30";
+    $("#erfahrung").value = e.erfahrung || "egal"; if ($("#erfahrung").selectedIndex < 0) $("#erfahrung").value = "egal";
+    $("#ohne").value = e.ohne || "";
     $("#von").value = e.pensum_von ?? 60; $("#bis").value = e.pensum_bis ?? 100; } } catch (e) {}
+  if (!document.querySelector("#reiter .an")) regionWaehlen("schweiz");
   aktualisieren();
 }
 
@@ -127,14 +167,26 @@ function zeichnen() {
   const zeigen = alleZeigen ? s.stellen : passend;
   const kopf = el("div", "kopf");
   kopf.append(el("h2", null, bewertet ? `${passend.length} passende Stellen` : `${s.stellen.length} Stellen gefunden`));
-  kopf.append(el("span", "leise", `Suche vom ${s.zeit} · Stichworte: ${s.stichworte.join(", ")} · ${s.ort || "ganze Schweiz"} · ${s.pensum[0]}–${s.pensum[1]} % · ${s.stellen.length} geprüft`));
+  const extra = (s.erfahrung ? ` · ${s.erfahrung}` : "") + (s.ohne && s.ohne.length ? ` · ohne: ${s.ohne.join(", ")}` : "");
+  kopf.append(el("span", "leise", `Suche vom ${s.zeit} · Stichworte: ${s.stichworte.join(", ")} · ${s.ort || "ganze Schweiz"}${extra} · ${s.pensum[0]}–${s.pensum[1]} % · ${s.stellen.length} geprüft`));
   box.append(kopf);
+  const weg = s.ausgeblendet || [];
+  if (weg.length) {
+    const anzahl = {}; weg.forEach(x => anzahl[x.warum] = (anzahl[x.warum] || 0) + 1);
+    const p = el("p", "leise", `${weg.length} Stellen ausgeblendet: ` + Object.entries(anzahl).map(([w, n]) => `${n} ${w.startsWith("„") ? "mit " + w : w}`).join(", ") + ". ");
+    const b = el("button", "mehr", wegZeigen ? "Wieder ausblenden" : "Trotzdem zeigen");
+    b.onclick = () => { wegZeigen = !wegZeigen; zeichnen(); }; p.append(b); box.append(p);
+  }
   if (!bewertet) box.append(el("p", "leise", "Ohne Lebenslauf nicht nach Passung sortiert, die neuesten stehen oben. Mit Lebenslauf neu suchen, dann bewertet Claude jede Stelle."));
   if (s.portal_fehler && s.portal_fehler.length) box.append(el("p", "leise", "Nicht erreichbar: " + s.portal_fehler.join("; ")));
   zeigen.forEach(st => box.append(karte(st)));
   const rest = s.stellen.length - passend.length;
   if (rest > 0) { const b = el("button", "mehr", alleZeigen ? "Nur passende zeigen" : `Auch die ${rest} weniger passenden zeigen`);
     b.onclick = () => { alleZeigen = !alleZeigen; zeichnen(); }; box.append(b); }
+  if (wegZeigen && weg.length) {
+    box.append(el("h2", null, "Ausgeblendet")); 
+    weg.forEach(st => box.append(karteWeg(st)));
+  }
 }
 
 function karte(st) {
@@ -142,9 +194,11 @@ function karte(st) {
   k.append(st.punkte == null ? el("div", "punkte tief", "–")
     : el("div", "punkte" + (st.punkte >= 70 ? "" : st.punkte >= stand.mindestens ? " mittel" : " tief"), st.punkte));
   const mitte = el("div");
-  mitte.append(el("div", "titel", st.titel));
+  const titel = el("div", "titel", st.titel);
+  if (st.einsteiger) titel.append(el("span", "marke", "Einsteiger"));
+  mitte.append(titel);
   const p = st.pensum ? ` · ${st.pensum[0] === st.pensum[1] ? st.pensum[0] : st.pensum[0] + "–" + st.pensum[1]} %` : "";
-  mitte.append(el("div", "leise", `${st.firma || "—"} · ${st.ort || "—"}${p} · ${st.portal}${st.datum ? " · " + st.datum.split("-").reverse().join(".") : ""}`));
+  mitte.append(el("div", "leise", `${st.firma || "—"} · ${st.ort || "—"}${p} · ${st.portal}${st.datum ? " · " + st.datum.split("-").reverse().join(".") : ""}${st.km != null ? " · " + st.km + " km" : ""}`));
   mitte.append(el("div", "grund", st.grund));
   k.append(mitte);
   const akt = el("div", "aktionen");
@@ -155,6 +209,18 @@ function karte(st) {
   if (/^https:\/\//.test(st.link || "")) { const a = el("a", "link", "Inserat öffnen ↗"); a.href = st.link; a.target = "_blank"; a.rel = "noopener"; akt.append(a); }
   k.append(akt);
   if (offen.has(st.key) || status === "laeuft") setTimeout(() => bewerbung(st.key, k, b, true), 0);
+  return k;
+}
+
+function karteWeg(st) {
+  const k = el("div", "karte stelle weg");
+  k.append(el("div", "punkte tief", "–"));
+  const mitte = el("div"); mitte.append(el("div", "titel", st.titel));
+  mitte.append(el("div", "leise", `${st.firma || "—"} · ${st.ort || "—"} · ${st.portal}${st.km != null ? " · " + st.km + " km" : ""} · ausgeblendet: ${st.warum}`));
+  k.append(mitte);
+  const akt = el("div", "aktionen");
+  if (/^https:\/\//.test(st.link || "")) { const a = el("a", "link", "Inserat öffnen ↗"); a.href = st.link; a.target = "_blank"; a.rel = "noopener"; akt.append(a); }
+  k.append(akt);
   return k;
 }
 
@@ -219,10 +285,12 @@ function markdown(text) {
 }
 
 $("#suchen").onclick = async () => {
-  const eingabe = {stichworte: $("#stichworte").value, ort: $("#ort").value,
+  const eingabe = {stichworte: $("#stichworte").value, region, kantone: gewaehlt(),
+                   umkreis_ort: $("#umkreis-ort").value, umkreis_km: +$("#umkreis-km").value,
+                   erfahrung: $("#erfahrung").value, ohne: $("#ohne").value,
                    pensum_von: +$("#von").value, pensum_bis: +$("#bis").value};
   try { localStorage.setItem("eingabe", JSON.stringify(eingabe)); } catch (e) {}
-  offen.clear(); alleZeigen = false;
+  offen.clear(); alleZeigen = false; wegZeigen = false;
   const r = await api("/api/suchen", eingabe);
   if (r.fehler) status(r.fehler, true);
   aktualisieren();
