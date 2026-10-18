@@ -38,11 +38,14 @@ CV_ORDNER = DATEN / "lebenslauf"   # genau EIN hochgeladener Lebenslauf
 # die per DNS-Rebinding oder CSRF auf den lokalen Server zugreifen wollen).
 EIGENE_HOSTS = (f"localhost:{PORT}", f"127.0.0.1:{PORT}")
 EIGENE_HERKUNFT = tuple(f"http://{h}" for h in EIGENE_HOSTS)
-DATEIEN = ("Lebenslauf.docx", "Anschreiben.docx", "anschreiben.txt", "lebenslauf.md")
+# Je Dokument: Textdatei (zuletzt geschrieben = fertig) und Word-Datei.
+ARTEN = {"lebenslauf": ("lebenslauf.md", "Lebenslauf.docx"),
+         "anschreiben": ("anschreiben.txt", "Anschreiben.docx")}
+MAX_DOKUMENT = 30_000   # Zeichen, die man im Fenster bearbeiten kann
 
 zustand = {"laeuft": False, "meldung": "", "fehler": None}
 suche = {}            # letzte Suche (auch nach Neustart aus der Datei)
-bewerbungen = {}      # key -> {"status", "fehler", "lebenslauf", "anschreiben"}
+bewerbungen = {}      # "art|key" -> {"status", "meldung", "fehler", "kennung", "text"}
 sperre = threading.Lock()
 
 
@@ -90,16 +93,15 @@ def _speichern():
 
 
 def _bewerbungen_laden():
-    """Fertige Bewerbungen zur aktuellen Suche und zum aktuellen Lebenslauf."""
+    """Fertige Dokumente zur aktuellen Suche und zum aktuellen Lebenslauf."""
     _, kennung = _aktueller_cv()
     neu = {}
     for s in suche.get("stellen", []):
         o = _ordner(s["key"], kennung)
-        if kennung and all((o / d).exists() for d in DATEIEN):
-            neu[s["key"]] = {
-                "status": "fertig", "kennung": kennung,
-                "lebenslauf": (o / "lebenslauf.md").read_text("utf-8"),
-                "anschreiben": (o / "anschreiben.txt").read_text("utf-8")}
+        for art, (textdatei, _) in ARTEN.items():
+            if kennung and (o / textdatei).exists():
+                neu[f"{art}|{s['key']}"] = {"status": "fertig", "kennung": kennung,
+                                            "text": (o / textdatei).read_text("utf-8")}
     with sperre:
         # Laufende behalten; fertige nur, wenn sie zum aktuellen Lebenslauf gehoeren
         # (koennen zwischen Lesen und Sperre fertig geworden sein).
@@ -191,6 +193,53 @@ FUER_EINSTEIGER = re.compile(
     r"junior|einsteiger|quereinsteig|trainee|\bprakti(kum|kant)(in)?\b|"
     r"ohne (berufs)?erfahrung|keine (berufs)?erfahrung|"
     r"erfahrung (ist )?nicht (zwingend|nötig|notwendig)", re.I)
+# Verlangte Berufserfahrung im Inseratetext.
+_ZAHL = {"ein": 1, "eins": 1, "einem": 1, "zwei": 2, "drei": 3, "vier": 4, "fünf": 5,
+         "sechs": 6, "sieben": 7, "acht": 8, "neun": 9, "zehn": 10, "one": 1, "two": 2,
+         "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "ten": 10,
+         "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5}
+_N = r"(?<![\d'’.,])\b(\d{1,2}|" + "|".join(_ZAHL) + r")\b"
+# „erfahrung“ deckt Berufs-, Verkaufs-, Praxiserfahrung ab; „Praxis“ allein waere
+# auch die Arztpraxis.
+_ERF = r"(erfahrung|experience|expérience)"
+_JAHRE = r"\s*\+?\s*(?:(?:-|–|bis|to|à)\s*\d{1,2}\s*)?\+?\s*(?:jahre?n?|years?|ans)\b"
+JAHRE_VOR = re.compile(_N + _JAHRE + r"[^.\n•;:]{0,25}?" + _ERF, re.I)
+JAHRE_NACH = re.compile(_ERF + r"[^.\n•;]{0,40}?" + _N + _JAHRE, re.I)
+# Davor stehend meint die Zahl ein Alter oder das Firmenalter, keine Erfahrung.
+KEINE_ERFAHRUNGSZAHL = re.compile(r"(seit|über|alter|kinder\w*|zwischen|und|ab|jugendliche\w*|"
+                                  r"schüler\w*|personen|menschen)\s*$", re.I)
+_BEZUG = r"[^.\n•;]{0,40}?" + _ERF          # Wort muss sich auf Erfahrung beziehen
+MEHRJAEHRIG = re.compile(r"(mehrjährig\w*|mehrere jahre|several years|plusieurs années)" + _BEZUG
+                         + r"|expérience confirmée|ausgewiesene \w*erfahrung"
+                         r"|fundierte \w*erfahrung|solide \w*erfahrung", re.I)
+LANGJAEHRIG = re.compile(r"(langjährig\w*|many years)" + _BEZUG
+                         + r"|extensive experience|longue expérience", re.I)
+EINIGE = re.compile(r"(einige jahre|some years|quelques années)" + _BEZUG, re.I)
+
+
+def verlangte_jahre(text):
+    """Grob: wie viele Jahre Erfahrung verlangt das Inserat? None = nichts erkannt."""
+    text = re.sub(r"\\", "", text or "")
+    jahre = []
+    for m in list(JAHRE_VOR.finditer(text)) + list(JAHRE_NACH.finditer(text)):
+        gruppe = 1 if m.re is JAHRE_VOR else 2
+        wort = m.group(gruppe)
+        if KEINE_ERFAHRUNGSZAHL.search(text[max(0, m.start(gruppe) - 25):m.start(gruppe)]):
+            continue
+        n = int(wort) if wort.isdigit() else _ZAHL.get(wort.lower())
+        if n and n <= 15:          # „seit 50 Jahren Erfahrung“ meint die Firma
+            jahre.append(n)
+    if LANGJAEHRIG.search(text):
+        jahre.append(5)
+    if MEHRJAEHRIG.search(text):
+        jahre.append(4)            # „mehrjährig“ ist mehr als Junior (1–3 Jahre)
+    if EINIGE.search(text):
+        jahre.append(2)
+    return max(jahre) if jahre else None
+
+
+# Ab so vielen verlangten Jahren faellt eine Stelle weg.
+ZU_VIEL_JAHRE = {"einsteiger": 2, "junior": 4}
 MAX_STICHWORTE = 8
 MAX_AUSGEBLENDET = 300
 
@@ -244,6 +293,7 @@ def _filtern(stellen, erfahrung, ohne):
     muster = [(w, re.compile(("" if len(w) >= 4 else r"(?<!\w)") + re.escape(w), re.I))
               for w in ohne]
     for s in stellen:
+        s["titel"] = s.get("titel") or ""
         inhalt = f'{s["titel"]} {s.get("vorschau") or ""}'
         wort = next((w for w, m in muster if m.search(inhalt)), None)
         titel = s["titel"]
@@ -257,9 +307,73 @@ def _filtern(stellen, erfahrung, ohne):
                                and bool(FUER_EINSTEIGER.search(inhalt)))
             bleiben.append(s)
             continue
-        if len(weg) < MAX_AUSGEBLENDET:   # schlank: nur was die Seite anzeigt
-            weg.append({k: s.get(k) for k in ("key", "titel", "firma", "ort", "portal",
-                                              "km", "link", "warum")})
+        weg.append(_schlank(s, s["warum"]))
+    return bleiben, weg
+
+
+def _schlank(s, warum):
+    return {**{k: s.get(k) for k in ("key", "titel", "firma", "ort", "portal", "km", "link")},
+            "warum": warum}
+
+
+def _gemischt(weg):
+    """Hoechstens MAX_AUSGEBLENDET, abwechselnd aus jedem Grund, damit kein Grund
+    die anderen verdraengt."""
+    gruppen = {}
+    for w in weg:
+        gruppen.setdefault(w["warum"], []).append(w)
+    ergebnis, nr = [], 0
+    while len(ergebnis) < MAX_AUSGEBLENDET and any(nr < len(g) for g in gruppen.values()):
+        ergebnis += [g[nr] for g in gruppen.values() if nr < len(g)]
+        nr += 1
+    return ergebnis[:MAX_AUSGEBLENDET]
+
+
+def _titel_passt(stellen, stichworte):
+    """Portale suchen im ganzen Text: „Sales“ bringt sonst auch eine Radiologie-
+    Fachfrau, weil die Firma „Sales“ im Text hat. Behalten wird nur, wessen Titel
+    den Suchbegriff oder ein gleichbedeutendes Wort enthaelt."""
+    if not stellen:
+        return stellen, []
+    _melden("Claude sucht gleichbedeutende Berufswörter …")
+    try:
+        woerter = ki.titelwoerter(stichworte)
+    except Exception as e:
+        # Ohne Claude wuerde der woertliche Begriff zu viel wegwerfen
+        # („Sozialberatung“ trifft „Sozialberater“ nicht): dann nicht filtern.
+        print("Titelwörter fehlgeschlagen:", repr(e))
+        return stellen, []
+    gleich = lambda x: re.sub(r"[-/_:*]+", " ", (x or "").lower())
+    teile = set()
+    for w in stichworte:
+        teile.add(gleich(w))
+        teile.update(t for t in gleich(w).split() if len(t) >= 4)   # „Sales Manager“
+    for liste in woerter.values():
+        teile.update(gleich(x) for x in liste)
+    teile = [t.strip() for t in teile if len(t.strip()) >= 4]
+    bleiben, weg = [], []
+    for s in stellen:
+        titel = gleich(s.get("titel"))
+        (bleiben if any(t in titel for t in teile) else weg).append(s)
+    if not bleiben:          # lieber alles zeigen als nichts (z. B. Tippfehler)
+        return stellen, []
+    return bleiben, [_schlank(s, "Titel passt nicht zum Suchbegriff") for s in weg]
+
+
+def _erfahrung_im_text(stellen, erfahrung):
+    """Liest die Inseratetexte und blendet aus, was zu viel Erfahrung verlangt."""
+    texte = portale.texte_holen(stellen, _melden)
+    grenze = ZU_VIEL_JAHRE[erfahrung]
+    bleiben, weg = [], []
+    for s in stellen:
+        text = texte.get(s["key"])
+        s["ungeprueft"] = text is None
+        jahre = verlangte_jahre(text or s.get("vorschau") or "")
+        # „Quereinsteiger willkommen“ wiegt mehr als „idealerweise 2 Jahre“.
+        if jahre is not None and jahre >= grenze and not s.get("einsteiger"):
+            weg.append(_schlank(s, "verlangt mehrjährige Erfahrung"))
+        else:
+            bleiben.append(s)
     return bleiben, weg
 
 
@@ -271,6 +385,7 @@ def suche_starten(eingabe):
         gebiet, ort = _gebiet(eingabe)        # Eingabefehler sofort, nicht erst nach Claude
         _, _, cv = _aktueller_cv(text=True)
         stichworte = [s.strip() for s in re.split(r"[,;\n]", str(eingabe.get("stichworte", ""))) if s.strip()]
+        eigene_stichworte = bool(stichworte)
         if not stichworte:
             if not cv:
                 raise RuntimeError("Bitte ein Stichwort eingeben (z. B. „Sozialberatung“). "
@@ -287,6 +402,16 @@ def suche_starten(eingabe):
         if not stellen:
             raise RuntimeError("Keine Stellen gefunden. " + "; ".join(fehler))
         stellen, ausgeblendet = _filtern(_auswahl(stellen, stichworte), erfahrung, ohne)
+        if eigene_stichworte:      # Claudes Begriffe aus dem Lebenslauf sind breiter gemeint
+            stellen, weg = _titel_passt(stellen, stichworte)
+            ausgeblendet += weg
+        if erfahrung in ZU_VIEL_JAHRE and stellen:
+            stellen, weg = _erfahrung_im_text(stellen, erfahrung)
+            ausgeblendet += weg
+        anzahl_weg = {}
+        for w in ausgeblendet:
+            anzahl_weg[w["warum"]] = anzahl_weg.get(w["warum"], 0) + 1
+        ausgeblendet = _gemischt(ausgeblendet)
         # Einsteiger-Stellen zuerst: sie kommen sicher in die Bewertung und stehen
         # ohne Lebenslauf oben (sort ist stabil, die Reihenfolge sonst bleibt).
         stellen.sort(key=lambda s: not s.get("einsteiger"))
@@ -308,7 +433,7 @@ def suche_starten(eingabe):
         suche = {"zeit": time.strftime("%d.%m.%Y %H:%M"), "bewertet": bool(cv and stellen),
                  "stichworte": stichworte, "ort": ort, "pensum": [von, bis],
                  "erfahrung": ERFAHRUNG[erfahrung], "ohne": ohne,
-                 "stellen": stellen, "ausgeblendet": ausgeblendet, "portal_fehler": fehler}
+                 "stellen": stellen, "ausgeblendet": ausgeblendet, "ausgeblendet_anzahl": anzahl_weg, "portal_fehler": fehler}
         _speichern()
         _bewerbungen_laden()
         zustand["fehler"] = None
@@ -320,33 +445,94 @@ def suche_starten(eingabe):
         zustand["meldung"] = ""
 
 
-def bewerbung_erstellen(key, stelle, cv, kennung):
-    """cv (Text) und kennung wurden beim Klick festgehalten — ein Upload waehrend
-    des Laufs kann den Inhalt nicht mehr vermischen."""
-    eintrag = bewerbungen[key]
+def _foto(o):
+    return next((o / f"foto.{e}" for e in ("png", "jpg") if (o / f"foto.{e}").exists()), None)
+
+
+def _inserat(o, stelle):
+    """Inseratetext einmal holen und ablegen. Schreiben ueber eine Zwischendatei,
+    damit ein paralleler Lauf (Lebenslauf + Anschreiben) nie einen halben Text liest."""
+    datei = o / "inserat.txt"
+    if datei.exists():
+        return datei.read_text("utf-8")
+    inserat = portale.inseratetext(stelle)
+    tmp = o / f".inserat-{threading.get_ident()}.txt"
+    tmp.write_text(inserat, "utf-8")
+    os.replace(tmp, datei)
+    return inserat
+
+
+def _word(art, text, o):
+    """Word-Datei schreiben; ein unbrauchbares Foto darf den Lebenslauf nie verhindern."""
+    worddatei = o / ARTEN[art][1]
+    if art == "anschreiben":
+        return dokumente.anschreiben_docx(text, worddatei)
+    foto = _foto(o)
     try:
-        eintrag["meldung"] = "Hole den vollen Inseratetext …"
-        inserat = portale.inseratetext(stelle)
-        eintrag["meldung"] = "Claude schreibt Lebenslauf und Anschreiben (1–3 Min.) …"
-        lebenslauf, anschreiben = ki.bewerbung(cv, stelle, inserat, time.strftime("%d.%m.%Y"))
-        o = _ordner(key, kennung)
-        o.mkdir(parents=True, exist_ok=True)
-        (o / "inserat.txt").write_text(inserat, "utf-8")
-        # Reihenfolge: lebenslauf.md zuletzt — erst dann gilt die Bewerbung als fertig.
-        dokumente.lebenslauf_docx(lebenslauf, o / "Lebenslauf.docx")
-        dokumente.anschreiben_docx(anschreiben, o / "Anschreiben.docx")
-        (o / "anschreiben.txt").write_text(anschreiben, "utf-8")
-        (o / "lebenslauf.md").write_text(lebenslauf, "utf-8")
-        with sperre:   # Pruefen und Setzen in einem Schritt (Upload dazwischen)
-            if _cv_kennung(_lebenslauf()) == kennung:
-                eintrag.update(status="fertig", kennung=kennung,
-                               lebenslauf=lebenslauf, anschreiben=anschreiben)
-            elif bewerbungen.get(key) is eintrag:
-                bewerbungen.pop(key, None)   # inzwischen anderer Lebenslauf gewählt
+        dokumente.lebenslauf_docx(text, worddatei, foto.read_bytes() if foto else None)
     except Exception as e:
-        print("Bewerbung fehlgeschlagen:", repr(e))
-        with sperre:
-            eintrag.update(status="fehler", fehler=str(e))
+        print("Word mit Foto fehlgeschlagen:", repr(e))
+        dokumente.lebenslauf_docx(text, worddatei)
+
+
+def dokument_erstellen(art, key, stelle, cv, cv_pfad, kennung, geaendert=None):
+    """Erstellt den Lebenslauf ODER das Anschreiben (getrennt). Mit `geaendert`
+    (Text aus dem Fenster) ueberarbeitet Claude die Fassung der Person — die geht
+    in keinem Fehlerfall verloren. cv, cv_pfad und kennung wurden beim Klick
+    festgehalten."""
+    eintrag = bewerbungen[f"{art}|{key}"]
+    textdatei = ARTEN[art][0]
+    o = _ordner(key, kennung)
+    name = "Lebenslauf" if art == "lebenslauf" else "Anschreiben"
+    vorher = (o / textdatei).read_text("utf-8") if (o / textdatei).exists() else None
+    ergebnis, fehler = None, None
+    try:
+        o.mkdir(parents=True, exist_ok=True)
+        eintrag["meldung"] = "Hole den vollen Inseratetext …"
+        inserat = _inserat(o, stelle)
+        if art == "lebenslauf" and not _foto(o) and cv_pfad:
+            try:                                  # Foto aus dem Original uebernehmen;
+                bild = dokumente.foto(cv_pfad)    # ein Fehler hier kostet nur das Foto
+                if bild:
+                    (o / "foto.jpg").write_bytes(bild)
+            except Exception as e:
+                print("Foto übersprungen:", repr(e))
+        datum = time.strftime("%d.%m.%Y")
+        if geaendert is None:
+            eintrag["meldung"] = f"Claude schreibt den {name} (1–2 Min.) …"
+            ergebnis = (ki.lebenslauf(cv, stelle, inserat) if art == "lebenslauf"
+                        else ki.anschreiben(cv, stelle, inserat, datum))
+        else:
+            eintrag["meldung"] = f"Claude baut deine Änderungen in den {name} ein (1–2 Min.) …"
+            ergebnis = ki.ueberarbeiten(art, cv, stelle, inserat, vorher or "", geaendert, datum)
+    except Exception as e:
+        print("Dokument fehlgeschlagen:", repr(e))
+        fehler = str(e)
+    if ergebnis is None and geaendert is not None:
+        ergebnis = geaendert                      # deine Fassung zaehlt, auch ohne Claude
+        fehler = f"Überarbeitung fehlgeschlagen ({fehler}). Deine Fassung ist unverändert gespeichert."
+    try:
+        if ergebnis is not None:
+            o.mkdir(parents=True, exist_ok=True)
+            (o / ARTEN[art][1]).unlink(missing_ok=True)   # nie eine veraltete Word-Datei
+            try:
+                _word(art, ergebnis, o)
+            except Exception as e:
+                print("Word fehlgeschlagen:", repr(e))
+                fehler = "Die Word-Datei konnte nicht erstellt werden: " + str(e)
+            (o / textdatei).write_text(ergebnis, "utf-8")   # zuletzt: erst jetzt fertig
+    except OSError as e:
+        print("Speichern fehlgeschlagen:", repr(e))
+        fehler, ergebnis = "Speichern fehlgeschlagen: " + str(e), ergebnis
+    text = ergebnis if ergebnis is not None else vorher
+    with sperre:   # Pruefen und Setzen in einem Schritt (Upload dazwischen)
+        if _cv_kennung(_lebenslauf()) != kennung:
+            if bewerbungen.get(f"{art}|{key}") is eintrag:
+                bewerbungen.pop(f"{art}|{key}", None)   # inzwischen anderer Lebenslauf
+        elif text is not None:
+            eintrag.update(status="fertig", kennung=kennung, text=text, fehler=fehler)
+        else:
+            eintrag.update(status="fehler", fehler=fehler or "Unbekannter Fehler")
 
 
 def _stelle(key):
@@ -361,6 +547,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", typ)
         self.send_header("Content-Length", str(len(inhalt)))
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
@@ -372,6 +560,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _fremd(self):
         if self.headers.get("Host") not in EIGENE_HOSTS:
+            return True
+        # Browser melden, ob eine fremde Seite die Anfrage ausloest (z. B. <img> auf
+        # das Foto). Die Startseite selbst darf man von ueberall aufrufen.
+        if (self.path.split("?")[0] != "/"
+                and self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none")):
             return True
         herkunft = self.headers.get("Origin")
         return bool(herkunft) and herkunft not in EIGENE_HERKUNFT
@@ -387,14 +580,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._senden(200, {"name": Path(cv).name if cv else None})
         if pfad == "/api/stand":
             with sperre:
-                status = {k: v.get("status") for k, v in bewerbungen.items()}
+                status = {k: v.get("status") for k, v in bewerbungen.items()}   # "art|key"
             return self._senden(200, {"zustand": zustand, "suche": suche,
                                       "mindestens": MINDESTENS, "bewerbungen": status})
-        m = re.fullmatch(r"/api/bewerbung/(.+)", pfad)
+        m = re.fullmatch(r"/api/bewerbung/(lebenslauf|anschreiben)/(.+)", pfad)
         if m:
+            key = unquote(m.group(2))
             with sperre:
-                e = dict(bewerbungen.get(unquote(m.group(1)), {"status": "keine"}))
+                e = dict(bewerbungen.get(f"{m.group(1)}|{key}", {"status": "keine"}))
+            if m.group(1) == "lebenslauf" and _stelle(key):
+                e["foto"] = bool(_foto(_ordner(key, _aktueller_cv()[1])))
             return self._senden(200, e)
+        m = re.fullmatch(r"/foto/(.+)", pfad)
+        if m and _stelle(unquote(m.group(1))):
+            foto = _foto(_ordner(unquote(m.group(1)), _aktueller_cv()[1]))
+            if foto:
+                return self._senden(200, foto.read_bytes(),
+                                    "image/png" if foto.suffix == ".png" else "image/jpeg",
+                                    {"Cache-Control": "no-store"})
         m = re.fullmatch(r"/download/(.+)/(Lebenslauf|Anschreiben)\.docx", pfad)
         if m and _stelle(unquote(m.group(1))):
             datei = _ordner(unquote(m.group(1)), _aktueller_cv()[1]) / f"{m.group(2)}.docx"
@@ -439,10 +642,18 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=suche_starten, args=(eingabe,), daemon=True).start()
             return self._senden(200, {"ok": True})
         if self.path == "/api/bewerbung":
-            key = str(eingabe.get("key", ""))
+            # {key, art} erstellt; {key, art, text} ueberarbeitet die Fassung aus dem Fenster.
+            key, art = str(eingabe.get("key", "")), str(eingabe.get("art", ""))
+            geaendert = eingabe.get("text")
             stelle = _stelle(key)
+            if art not in ARTEN:
+                return self._senden(400, {"fehler": "Unbekanntes Dokument."})
             if not stelle:
                 return self._senden(404, {"fehler": "Stelle gehört nicht zur aktuellen Suche."})
+            if geaendert is not None:
+                geaendert = str(geaendert).strip()[:MAX_DOKUMENT]
+                if len(geaendert) < 20:
+                    return self._senden(400, {"fehler": "Der Text ist (fast) leer."})
             try:
                 cv_pfad, kennung, cv = _aktueller_cv(text=True)
             except Exception as e:
@@ -451,10 +662,11 @@ class Handler(BaseHTTPRequestHandler):
             if not cv_pfad:
                 return self._senden(400, {"fehler": "Bitte zuerst oben deinen Lebenslauf hochladen."})
             with sperre:
-                if bewerbungen.get(key, {}).get("status") == "laeuft":
+                if bewerbungen.get(f"{art}|{key}", {}).get("status") == "laeuft":
                     return self._senden(200, {"ok": True})
-                bewerbungen[key] = {"status": "laeuft", "meldung": "Starte …"}
-            threading.Thread(target=bewerbung_erstellen, args=(key, stelle, cv, kennung),
+                bewerbungen[f"{art}|{key}"] = {"status": "laeuft", "meldung": "Starte …"}
+            threading.Thread(target=dokument_erstellen,
+                             args=(art, key, stelle, cv, cv_pfad, kennung, geaendert),
                              daemon=True).start()
             return self._senden(200, {"ok": True})
         self._senden(404, {"fehler": "nicht gefunden"})

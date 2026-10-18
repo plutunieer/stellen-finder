@@ -15,6 +15,8 @@ import json
 import math
 import re
 import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +37,7 @@ def _holen(url, daten=None):
         daten = json.dumps(daten).encode()
     anfrage = urllib.request.Request(url, data=daten, headers=kopf)
     with urllib.request.urlopen(anfrage, timeout=ZEITLIMIT) as antwort:
-        return antwort.read().decode("utf-8", "replace")
+        return antwort.read(8_000_000).decode("utf-8", "replace")   # Grenze gegen Riesenantworten
 
 
 def text_aus_html(roh):
@@ -420,7 +422,7 @@ def _jobroom(stichwort, gebiet):
         beschr = (c.get("jobDescriptions") or [{}])[0]
         text = re.sub(r"</?em>", "", beschr.get("description") or "")
         text = re.sub(r"\\([*_#\[\]()-])", r"\1", text)
-        titel = re.sub(r"</?em>", "", beschr.get("title") or "")
+        titel = html.unescape(re.sub(r"</?em>", "", beschr.get("title") or ""))
         link = c.get("externalUrl") or f"https://www.job-room.ch/job-search/{a.get('id')}"
         if link and not link.startswith("http"):
             link = "https://" + link
@@ -459,6 +461,52 @@ def inseratetext(stelle):
     return stelle.get("vorschau", "")
 
 
+class _Takt:
+    """Hoechstens ein Abruf je `abstand` Sekunden — jobs.ch sperrt nach etwa 300
+    Abrufen in wenigen Minuten (gemessen 18.10.2026), LinkedIn noch frueher."""
+    def __init__(self, abstand):
+        self.abstand, self.naechster, self.sperre = abstand, 0.0, threading.Lock()
+
+    def warten(self):
+        with self.sperre:
+            jetzt = time.time()
+            start = max(jetzt, self.naechster)
+            self.naechster = start + self.abstand
+        time.sleep(max(0.0, start - jetzt))
+
+
+def texte_holen(stellen, melden=lambda t: None, frist=150):
+    """Volle Inseratetexte fuer die Erfahrungs-Pruefung, in Reihenfolge der Liste.
+    Gibt {key: text} zurueck; was nicht in der Frist geladen wird, fehlt.
+    Je Portal ein eigener Takt; sperrt ein Portal, hoeren seine Abrufe sofort auf."""
+    ende = time.time() + frist
+    takte = {"jobs.ch": _Takt(0.6), "jobup.ch": _Takt(0.6), "linkedin": _Takt(2.0)}
+    gesperrt = {name: threading.Event() for name in takte}
+
+    def holen(s):
+        portal = s["key"].split(":", 1)[0]
+        if portal not in takte or gesperrt[portal].is_set() or time.time() > ende:
+            return s["key"], None
+        takte[portal].warten()
+        if time.time() > ende or gesperrt[portal].is_set():
+            return s["key"], None
+        try:
+            return s["key"], inseratetext(s)
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429):        # gesperrt: dieses Portal nicht weiter belasten
+                gesperrt[portal].set()
+        except Exception:
+            pass                            # z. B. geloeschtes Inserat: nur diese Stelle
+        return s["key"], None
+
+    fertig = {s["key"]: s["text"] for s in stellen if s.get("text")}
+    offen = [s for s in stellen if not s.get("text")]
+    melden(f"Prüfe in {len(offen)} Inseraten die verlangte Erfahrung (bis {frist // 60} Min.) …")
+    with ThreadPoolExecutor(6) as pool:
+        fertig.update((k, v) for k, v in pool.map(holen, offen) if v)
+    return fertig
+
+
 def _schluessel(stelle):
     """Gleiche Stelle auf mehreren Portalen (Job-Room spiegelt z. B. jobs.ch)."""
     norm = lambda t: re.sub(r"[^a-z0-9]", "", (t or "").lower())
@@ -476,9 +524,12 @@ def suchen(stichworte, gebiet, pensum_von, pensum_bis, melden=lambda t: None):
     def holen(name, stichwort):
         try:
             return PORTALE[name](stichwort, gebiet), None
+        except urllib.error.HTTPError as e:
+            grund = ("kurz gesperrt (zu viele Abfragen), in 2 Minuten nochmal versuchen"
+                     if e.code in (403, 429) else f"Fehler {e.code}")
         except Exception as e:
             grund = str(e) if isinstance(e, RuntimeError) else type(e).__name__
-            return [], f"{name} ({stichwort}): {grund}"
+        return [], f"{name} ({stichwort}): {grund}"
 
     gesehen, stellen, fehler = set(), [], []
     for stichwort in stichworte:

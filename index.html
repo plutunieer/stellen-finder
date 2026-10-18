@@ -36,9 +36,17 @@ button:disabled{opacity:.55;cursor:wait}
 .aktionen a.link{color:var(--blau-dunkel);font-size:13px;text-align:center}
 .ergebnis{grid-column:1/-1;border-top:1px solid var(--rand);padding-top:12px;margin-top:4px}
 .spalten{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.dok{border:1px solid var(--rand);border-radius:8px;padding:12px;background:#fbfcfe;max-height:520px;overflow:auto;white-space:pre-wrap;font-size:13.5px}
-.dok h3{margin:0 0 8px;font-size:14px;display:flex;justify-content:space-between;gap:8px;white-space:normal}
-.dok h3 a{font-size:12px;padding:4px 10px}
+.dok{border:1px solid var(--rand);border-radius:8px;background:#fbfcfe;font-size:13.5px;min-width:0}
+.dok h3{margin:0;padding:10px 12px;font-size:14px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--rand)}
+.dok .knoepfe{display:flex;gap:6px;flex-wrap:wrap}
+.dok .knoepfe button,.dok .knoepfe a{font-size:12px;padding:5px 10px}
+.dok .inhalt{padding:12px;max-height:560px;overflow:auto}
+.dok .text{outline:none;min-height:80px;border-radius:6px}
+.dok .text:focus{background:#fff;box-shadow:0 0 0 2px #a9c5ec}
+.dok .foto{float:right;width:96px;margin:0 0 8px 12px;border-radius:6px}
+.dok .notiz{font-size:12.5px;padding:6px 12px;background:var(--gelb);border-bottom:1px solid var(--rand)}
+.dok .tipp{font-size:12px;color:var(--leise);padding:0 12px 10px}
+.gespeichert{font-size:12px;font-weight:700;color:#8a5a00}
 .reiter{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
 .reiter button{background:#fff;font-weight:600}
 .reiter button.an{background:var(--blau);border-color:var(--blau-dunkel)}
@@ -172,8 +180,11 @@ function zeichnen() {
   box.append(kopf);
   const weg = s.ausgeblendet || [];
   if (weg.length) {
-    const anzahl = {}; weg.forEach(x => anzahl[x.warum] = (anzahl[x.warum] || 0) + 1);
-    const p = el("p", "leise", `${weg.length} Stellen ausgeblendet: ` + Object.entries(anzahl).map(([w, n]) => `${n} ${w.startsWith("„") ? "mit " + w : w}`).join(", ") + ". ");
+    let anzahl = s.ausgeblendet_anzahl;
+    if (!anzahl) { anzahl = {}; weg.forEach(x => anzahl[x.warum] = (anzahl[x.warum] || 0) + 1); }
+    const gesamt = Object.values(anzahl).reduce((a, b) => a + b, 0);
+    const p = el("p", "leise", `${gesamt} Stellen ausgeblendet: ` + Object.entries(anzahl).map(([w, n]) => `${n} ${w.startsWith("„") ? "mit " + w : w}`).join(", ") + ". ");
+    if (gesamt > weg.length) p.append(`(die ersten ${weg.length} lassen sich ansehen) `);
     const b = el("button", "mehr", wegZeigen ? "Wieder ausblenden" : "Trotzdem zeigen");
     b.onclick = () => { wegZeigen = !wegZeigen; zeichnen(); }; p.append(b); box.append(p);
   }
@@ -198,17 +209,19 @@ function karte(st) {
   if (st.einsteiger) titel.append(el("span", "marke", "Einsteiger"));
   mitte.append(titel);
   const p = st.pensum ? ` · ${st.pensum[0] === st.pensum[1] ? st.pensum[0] : st.pensum[0] + "–" + st.pensum[1]} %` : "";
-  mitte.append(el("div", "leise", `${st.firma || "—"} · ${st.ort || "—"}${p} · ${st.portal}${st.datum ? " · " + st.datum.split("-").reverse().join(".") : ""}${st.km != null ? " · " + st.km + " km" : ""}`));
+  mitte.append(el("div", "leise", `${st.firma || "—"} · ${st.ort || "—"}${p} · ${st.portal}${st.datum ? " · " + st.datum.split("-").reverse().join(".") : ""}${st.km != null ? " · " + st.km + " km" : ""}${st.ungeprueft ? " · Erfahrung nicht geprüft" : ""}`));
   mitte.append(el("div", "grund", st.grund));
   k.append(mitte);
   const akt = el("div", "aktionen");
-  const status = stand.bewerbungen[st.key];
-  const b = el("button", null, status === "fertig" ? "Bewerbung ansehen" : status === "laeuft" ? "Wird erstellt …" : "Bewerbung erstellen");
-  b.onclick = () => bewerbung(st.key, k, b);
-  akt.append(b);
+  ARTEN.forEach(([art, name]) => {
+    const b = el("button", "knopf-" + art); knopfText(b, name, stand.bewerbungen[art + "|" + st.key]);
+    b.onclick = () => oeffnen(st.key, k, art);
+    akt.append(b);
+  });
   if (/^https:\/\//.test(st.link || "")) { const a = el("a", "link", "Inserat öffnen ↗"); a.href = st.link; a.target = "_blank"; a.rel = "noopener"; akt.append(a); }
   k.append(akt);
-  if (offen.has(st.key) || status === "laeuft") setTimeout(() => bewerbung(st.key, k, b, true), 0);
+  const laeuft = ARTEN.some(([art]) => stand.bewerbungen[art + "|" + st.key] === "laeuft");
+  if (offen.has(st.key) || laeuft) setTimeout(() => oeffnen(st.key, k, null), 0);
   return k;
 }
 
@@ -224,41 +237,128 @@ function karteWeg(st) {
   return k;
 }
 
-async function bewerbung(key, k, knopf, nurAnzeigen) {
-  clearTimeout(timer[key]);
-  if (!k.isConnected) return;   // Karte wurde neu gezeichnet
+const ARTEN = [["lebenslauf", "Lebenslauf"], ["anschreiben", "Anschreiben"]];
+
+function knopfText(b, name, status) {
+  b.textContent = status === "fertig" ? name + " ansehen" : status === "laeuft" ? name + " wird erstellt …" : name + " erstellen";
+}
+
+// Oeffnet den Bewerbungsbereich einer Stelle; mit `art` wird dieses Dokument
+// erstellt, falls es noch keins gibt. Lebenslauf und Anschreiben sind getrennt.
+const entwurf = {};   // art+key -> noch nicht gespeicherter Text aus dem Fenster
+window.addEventListener("beforeunload", e => { if (Object.keys(entwurf).length) { e.preventDefault(); e.returnValue = ""; } });
+
+function oeffnen(key, k, art) {
+  if (!k.isConnected) return;
   offen.add(key);
-  let e = await api("/api/bewerbung/" + encodeURIComponent(key));
-  if (e.status === "keine" || e.status === "fehler") {
-    if (nurAnzeigen && e.status === "keine") {   // z. B. nach neuem Lebenslauf verworfen
-      offen.delete(key); k.querySelector(".ergebnis")?.remove();
-      knopf.disabled = false; knopf.textContent = "Bewerbung erstellen"; return;
-    }
-    if (!nurAnzeigen) {
-      const r = await api("/api/bewerbung", {key});
-      e = r.fehler ? {status: "fehler", fehler: r.fehler} : {status: "laeuft", meldung: "Starte …"};
-    }
-  }
   let box = k.querySelector(".ergebnis");
-  if (!box) { box = el("div", "ergebnis"); k.append(box); }
-  box.innerHTML = "";
-  if (e.status === "laeuft") {
-    knopf.disabled = true; knopf.textContent = "Wird erstellt …";
-    box.append(el("div", "leise", "⏳ " + (e.meldung || "")));
-    timer[key] = setTimeout(() => bewerbung(key, k, knopf, true), 2000);
+  const neu = !box;
+  if (neu) {
+    box = el("div", "ergebnis"); const sp = el("div", "spalten");
+    ARTEN.forEach(([a]) => { const d = el("div", "dok"); d.dataset.art = a; sp.append(d); });
+    box.append(sp); k.append(box);
+  }
+  // Nur neu laden, was neu ist oder angeklickt wurde — ein offenes Fenster, in dem
+  // gerade jemand schreibt, bleibt unangetastet.
+  ARTEN.forEach(([a]) => { if (neu || a === art) panel(key, a, k, a === art); });
+}
+
+async function starten(key, art, k, text) {
+  let r;
+  try { r = await api("/api/bewerbung", text == null ? {key, art} : {key, art, text}); }
+  catch (err) { r = {fehler: "Server nicht erreichbar. Läuft er noch?"}; }
+  if (text != null && !r.fehler) delete entwurf[art + key];
+  panel(key, art, k, false, r.fehler);
+}
+
+function zeigeFehler(k, art, text) {
+  const d = k.querySelector(`.dok[data-art="${art}"]`); if (!d) return;
+  d.querySelector(".fehlerzeile")?.remove();
+  const f = el("div", "notiz fehlerzeile", "Fehler: " + text); f.style.background = "var(--rot)";
+  d.insertBefore(f, d.children[1] || null);
+}
+
+async function panel(key, art, k, erstellen, fehlerText) {
+  clearTimeout(timer[art + key]);
+  if (!k.isConnected) return;
+  const d = k.querySelector(`.dok[data-art="${art}"]`);
+  const name = art === "lebenslauf" ? "Lebenslauf" : "Anschreiben";
+  let e;
+  try { e = await api(`/api/bewerbung/${art}/${encodeURIComponent(key)}`); }
+  catch (err) { timer[art + key] = setTimeout(() => panel(key, art, k), 4000); return; }
+  if (erstellen && e.status === "keine") { return starten(key, art, k); }
+  const kb = k.querySelector(".knopf-" + art); if (kb) knopfText(kb, name, e.status);
+  d.innerHTML = "";
+  if (fehlerText) setTimeout(() => zeigeFehler(k, art, fehlerText), 0);
+  const h = el("h3"); const titel = el("span", null, name + " "); const merk = el("span", "gespeichert");
+  titel.append(merk); h.append(titel); const kn = el("span", "knoepfe"); h.append(kn); d.append(h);
+  if (e.status === "keine" || (e.status === "fehler" && !e.text)) {
+    if (e.status === "fehler") zeigeFehler(k, art, e.fehler);
+    const b = el("button", null, e.status === "fehler" ? "Nochmal versuchen" : name + " erstellen");
+    b.onclick = () => starten(key, art, k); kn.append(b);
+    d.append(el("div", "inhalt leise", "Noch nicht erstellt."));
     return;
   }
-  knopf.disabled = false;
-  if (e.status === "fehler") { knopf.textContent = "Nochmal versuchen"; const f = el("div", "status fehler", "Fehler: " + e.fehler); f.style.display = "block"; box.append(f); return; }
-  knopf.textContent = "Neu erstellen";
-  knopf.onclick = () => api("/api/bewerbung", {key}).then(() => bewerbung(key, k, knopf, true));
-  const sp = el("div", "spalten");
-  [["Lebenslauf", e.lebenslauf], ["Anschreiben", e.anschreiben]].forEach(([name, text]) => {
-    const d = el("div", "dok"); const h = el("h3"); h.append(el("span", null, name));
-    const dl = el("a", "knopf", "Word herunterladen"); dl.href = `/download/${encodeURIComponent(key)}/${name}.docx`;
-    h.append(dl); d.append(h); d.append(name === "Lebenslauf" ? markdown(text) : el("div", null, text)); sp.append(d);
-  });
-  box.append(sp);
+  if (e.status === "laeuft") {
+    d.append(el("div", "inhalt leise", "⏳ " + (e.meldung || "")));
+    timer[art + key] = setTimeout(() => panel(key, art, k), 2000);
+    return;
+  }
+  // fertig: direkt im Fenster bearbeitbar
+  const speichern = el("button", null, "Änderungen speichern"); speichern.disabled = true;
+  const neu = el("button", null, "Neu schreiben lassen");
+  const dl = el("a", "knopf", "Word herunterladen"); dl.href = `/download/${encodeURIComponent(key)}/${name}.docx`;
+  kn.append(speichern, neu, dl);
+  if (e.fehler) zeigeFehler(k, art, e.fehler);
+  const inhalt = el("div", "inhalt");
+  if (art === "lebenslauf" && e.foto) {
+    const bild = el("img", "foto"); bild.alt = "Foto"; bild.src = `/foto/${encodeURIComponent(key)}?t=${Date.now()}`;
+    inhalt.append(bild);
+  }
+  const vorlage = entwurf[art + key] ?? e.text;   // Ungespeichertes geht beim Neuzeichnen nicht verloren
+  const text = art === "lebenslauf" ? markdown(vorlage) : el("div", null, vorlage);
+  text.classList.add("text"); text.contentEditable = "true"; text.spellcheck = true;
+  if (art !== "lebenslauf") text.style.whiteSpace = "pre-wrap";
+  const lesen = () => art === "lebenslauf" ? alsMarkdown(text) : text.innerText;
+  const ungespeichert = () => { speichern.disabled = false; merk.textContent = "· nicht gespeichert"; };
+  if (entwurf[art + key] != null) ungespeichert();
+  text.oninput = () => { entwurf[art + key] = lesen(); ungespeichert(); };
+  inhalt.append(text); d.append(inhalt);
+  d.append(el("div", "tipp", "In den Text klicken, ändern oder ergänzen, dann „Änderungen speichern“: Claude baut deine Änderungen sauber ein."));
+  speichern.onclick = () => {
+    speichern.disabled = true; neu.disabled = true;
+    starten(key, art, k, lesen());
+  };
+  neu.onclick = () => {
+    if (!confirm(`${name} ganz neu schreiben lassen? Deine Änderungen darin gehen dabei verloren.`)) return;
+    delete entwurf[art + key];
+    neu.disabled = true; speichern.disabled = true; starten(key, art, k);
+  };
+}
+
+// Der bearbeitete Lebenslauf (DOM) zurueck als Markdown, Gegenstueck zu markdown().
+// Block-Elemente (auch eingefuegte aus Word/Webseiten) werden eigene Zeilen.
+const BLOCK = new Set(["DIV", "P", "UL", "OL", "LI", "H1", "H2", "H3", "H4", "SECTION", "TABLE", "TR"]);
+function alsMarkdown(box) {
+  const zeilen = [];
+  const inline = n => n.nodeType === 3 ? n.textContent
+    : n.nodeName === "BR" ? " "
+    : ["STRONG", "B"].includes(n.nodeName) ? (t => t ? "**" + t + "**" : "")(n.textContent.trim())
+    : [...n.childNodes].map(inline).join("");
+  const block = (n, liste) => {
+    if (n.nodeType === 3) { const t = n.textContent.trim(); if (t) zeilen.push(t); return; }
+    if (n.nodeType !== 1 || n.nodeName === "IMG") return;
+    const hatBloecke = [...n.childNodes].some(c => BLOCK.has(c.nodeName));
+    if (n.nodeName === "UL" || n.nodeName === "OL") { [...n.childNodes].forEach(c => block(c, true)); return; }
+    if (hatBloecke && n.nodeName !== "LI") { [...n.childNodes].forEach(c => block(c, liste)); return; }
+    const t = inline(n).replace(/\s+/g, " ").trim(); if (!t) return;
+    if (n.nodeName === "H1") zeilen.push("# " + t);
+    else if (/^H[2-4]$/.test(n.nodeName)) zeilen.push("", "## " + t);
+    else if (n.nodeName === "LI" || liste) zeilen.push("- " + t);
+    else zeilen.push(t);
+  };
+  [...box.childNodes].forEach(n => block(n, false));
+  return zeilen.join("\n").trim();
 }
 
 // Einfaches Markdown (#, ##, -, **fett**) sicher als DOM, ohne innerHTML.
@@ -277,8 +377,9 @@ function markdown(text) {
       liste.append(zeile("li", z.replace(/^\s*[-•*] /, ""))); return;
     }
     liste = null;
-    if (z.startsWith("# ")) box.append(zeile("div", z.slice(2), "font-size:18px;font-weight:800"));
-    else if (z.startsWith("## ")) box.append(zeile("div", z.slice(3).toUpperCase(), "font-weight:800;color:#1f4e8c;margin-top:12px;font-size:12.5px;letter-spacing:.04em"));
+    // Echte h1/h2: Enter am Ende einer Ueberschrift ergibt einen normalen Absatz.
+    if (z.startsWith("# ")) box.append(zeile("h1", z.slice(2), "font-size:18px;font-weight:800;margin:0"));
+    else if (z.startsWith("## ")) box.append(zeile("h2", z.slice(3), "font-weight:800;color:#1f4e8c;margin:12px 0 0;font-size:12.5px;letter-spacing:.04em;text-transform:uppercase"));
     else box.append(zeile("div", z.replace(/^#+ /, ""), "margin:2px 0"));
   });
   return box;

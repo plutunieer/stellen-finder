@@ -11,7 +11,10 @@ Findet passende Stellen in der Schweiz und erstellt auf Klick den angepassten Le
    - **Region**: ganze Schweiz, mehrere Kantone oder Umkreis (10–50 km) um einen Ort oder eine PLZ.
    - **Ausschliessen**: Wörter wie „Aussendienst, Provision“ blenden Stellen aus. Ausgeblendetes lässt sich mit „Trotzdem zeigen“ ansehen.
 3. **Stellen suchen** (ca. 2 Min.): Die Seite zeigt die Stellen ab 50 Punkten, die beste steht oben.
-4. **Bewerbung erstellen** (ca. 1–3 Min.): Lebenslauf und Anschreiben erscheinen auf der Seite und lassen sich als Word-Datei herunterladen.
+   - Bei eigenen Stichworten zählen nur Stellen, deren Titel zum Begriff passt (Claude ergänzt gleichbedeutende Wörter, z. B. Sales → Verkauf, Vertrieb).
+   - Bei Einsteiger/Junior liest die Seite die Inseratetexte und blendet Stellen aus, die zu viel Erfahrung verlangen. Was nicht rechtzeitig gelesen werden konnte, ist mit „Erfahrung nicht geprüft“ markiert.
+4. **Lebenslauf erstellen** und **Anschreiben erstellen** (getrennt, je ca. 1–2 Min.): Claude passt das Dokument an die Stelle an, das Foto aus deinem Lebenslauf kommt oben rechts mit.
+5. Im Fenster direkt ändern oder ergänzen, dann **Änderungen speichern**: Claude baut deine Änderungen in genau dieses Dokument ein. Die Word-Datei ist danach aktuell.
 
 Es wird nichts verschickt.
 
