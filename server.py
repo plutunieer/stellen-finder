@@ -239,7 +239,10 @@ def _woerter(text):
 def _filtern(stellen, erfahrung, ohne):
     """Teilt in (bleiben, ausgeblendet). Jede ausgeblendete Stelle sagt, warum."""
     bleiben, weg = [], []
-    muster = [(w, re.compile(r"(?<!\w)" + re.escape(w), re.I)) for w in ohne]   # Wortanfang
+    # Ab 4 Buchstaben auch mitten im Wort („techniker“ trifft „Handytechniker“),
+    # kuerzere nur am Wortanfang (sonst traefe „it“ fast jede Stelle).
+    muster = [(w, re.compile(("" if len(w) >= 4 else r"(?<!\w)") + re.escape(w), re.I))
+              for w in ohne]
     for s in stellen:
         inhalt = f'{s["titel"]} {s.get("vorschau") or ""}'
         wort = next((w for w, m in muster if m.search(inhalt)), None)
