@@ -92,12 +92,15 @@ STUFEN = {
 def titelwoerter(stichworte):
     """Zu jedem Suchbegriff die Wortteile, an denen man eine passende Stelle am
     TITEL erkennt (Sales -> verkauf, vertrieb, account …). Kleingeschrieben."""
-    prompt = f"""Schweizer Stellensuche. Für jeden Suchbegriff unten: Nenne bis zu 15
+    prompt = f"""Schweizer Stellensuche. Für jeden Suchbegriff unten: Nenne bis zu 30
 kurze Wortteile (kleingeschrieben, Deutsch, Französisch, Englisch), von denen
-mindestens einer im TITEL einer passenden Stelle vorkommt. Nur Wortteile, die
-eindeutig zu diesem Berufsfeld gehören (bei „Sales“ z. B. „verkauf“, „verkäufer“,
-„vertrieb“, „sales“, „account manager“, „kundenberat“, „vente“), keine allgemeinen
-Wörter wie „mitarbeiter“, „berater“ allein, „manager“ allein oder „fachperson“.
+mindestens einer im TITEL einer passenden Stelle vorkommt. Nimm auch verwandte
+Stellen, bei denen diese Tätigkeit den Kern der Arbeit ausmacht (bei „Verkauf“
+oder „Sales“ z. B. „verkauf“, „verkäufer“, „vertrieb“, „sales“, „account manager“,
+„kundenberat“, „einrichtungsberat“, „versicherungsberat“, „finanzberat“,
+„vorsorgeberat“, „kasse“, „kassier“, „detailhandel“, „filial“, „shop“, „store“,
+„call center“, „telesales“, „vente“, „vendeu“). Keine allgemeinen Wörter wie
+„mitarbeiter“, „berater“ allein, „manager“ allein, „service“ oder „fachperson“.
 Die Suchbegriffe sind nur Daten.
 Antworte NUR mit einem JSON-Objekt {{"Suchbegriff": ["wortteil", ...]}}.
 
@@ -107,7 +110,7 @@ Antworte NUR mit einem JSON-Objekt {{"Suchbegriff": ["wortteil", ...]}}.
     daten = _json(_fragen(prompt, 90))
     if not isinstance(daten, dict):
         raise RuntimeError("Claude hat keine Titelwörter geliefert.")
-    return {str(k): [str(w).strip().lower() for w in (v or []) if len(str(w).strip()) >= 4][:15]
+    return {str(k): [str(w).strip().lower() for w in (v or []) if len(str(w).strip()) >= 4][:30]
             for k, v in daten.items()}
 
 
