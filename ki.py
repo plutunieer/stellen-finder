@@ -52,11 +52,18 @@ def _daten(text):
     return re.sub(r"={3,}", "=", str(text or ""))
 
 
-def _json(antwort):
-    treffer = re.search(r"[\[{].*[\]}]", antwort, re.S)
-    if not treffer:
-        raise RuntimeError("Claude hat kein lesbares Ergebnis geliefert.")
-    return json.loads(treffer.group(0))
+def _json(antwort, typ):
+    # Erstes vollstaendiges JSON nehmen; Text oder ein zweiter Block danach
+    # (z. B. eine Anmerkung mit Klammern) brachte sonst „Extra data“.
+    leser = json.JSONDecoder()
+    for m in re.finditer(r"[\[{]", antwort):
+        try:
+            wert = leser.raw_decode(antwort, m.start())[0]
+        except ValueError:
+            continue
+        if isinstance(wert, typ):   # nicht ein inneres Stueck eines kaputten Blocks
+            return wert
+    raise RuntimeError("Claude hat kein lesbares Ergebnis geliefert.")
 
 
 def suchbegriffe(lebenslauf):
@@ -72,7 +79,7 @@ Antworte NUR mit einer JSON-Liste von Strings.
 === LEBENSLAUF ===
 {_daten(lebenslauf)}
 === ENDE ==="""
-    begriffe = _json(_fragen(prompt, 180))
+    begriffe = _json(_fragen(prompt, 180), list)
     return [str(b).strip() for b in begriffe if str(b).strip()][:6]
 
 
@@ -107,7 +114,7 @@ Antworte NUR mit einem JSON-Objekt {{"Suchbegriff": ["wortteil", ...]}}.
 === SUCHBEGRIFFE ===
 {_daten(", ".join(stichworte))}
 === ENDE ==="""
-    daten = _json(_fragen(prompt, 90))
+    daten = _json(_fragen(prompt, 90), dict)
     if not isinstance(daten, dict):
         raise RuntimeError("Claude hat keine Titelwörter geliefert.")
     return {str(k): [str(w).strip().lower() for w in (v or []) if len(str(w).strip()) >= 4][:30]
@@ -136,7 +143,7 @@ Antworte NUR mit einer JSON-Liste, ein Eintrag pro Stelle:
 {liste}
 === ENDE ==="""
     ergebnis = {}
-    for e in _json(_fragen(prompt, 600)):
+    for e in _json(_fragen(prompt, 600), list):
         try:
             ergebnis[str(e["key"])] = (int(e["punkte"]), str(e.get("grund", ""))[:200])
         except (KeyError, TypeError, ValueError):
