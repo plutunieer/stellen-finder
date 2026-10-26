@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
-"""dokumente.py — hochgeladenen Lebenslauf lesen (Word/PDF) und Ergebnisse als Word schreiben."""
+"""dokumente.py — hochgeladenen Lebenslauf lesen (Word/PDF) und Ergebnisse als PDF schreiben."""
 
 import io
+import os
 import re
 import zipfile
 from pathlib import Path
-
-from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Cm, Pt, RGBColor
 
 MIN_FOTO = 5_000          # kleinere Bilder sind Symbole oder Logos, kein Foto
 MAX_BILD_BYTES = 15_000_000
@@ -109,63 +106,112 @@ def lebenslauf_text(pfad):
     return html.unescape("\n".join(absaetze))
 
 
-def _fett(absatz, text):
-    for i, stueck in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
-        if stueck:
-            absatz.add_run(stueck).bold = (i % 2 == 1)
+# Schrift mit Umlauten und Sonderzeichen; ohne sie bleibt Helvetica (nur Latin-1).
+SCHRIFTEN = [("/System/Library/Fonts/Supplemental/Arial.ttf",
+              "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+             ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+             ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")]
+BLAU = (0x1F, 0x4E, 0x8C)
+MM_BILD = 35              # Fotobreite im Lebenslauf
 
 
-def lebenslauf_docx(markdown, ziel, bild=None):
-    """bild: bytes des Fotos (png/jpg) oder None. Mit Foto stehen Name und
-    Berufstitel links in einer randlosen Tabelle, das Foto rechts daneben."""
-    doc = Document()
-    stil = doc.styles["Normal"]
-    stil.font.name, stil.font.size = "Calibri", Pt(10.5)
+def _pdf():
+    from fpdf import FPDF
+    pdf = FPDF(format="A4")
+    pdf.set_margins(20, 18, 20)
+    pdf.set_auto_page_break(True, 18)
+    for normal, fett in SCHRIFTEN:
+        if Path(normal).exists() and Path(fett).exists():
+            pdf.add_font("Text", "", normal)
+            pdf.add_font("Text", "B", fett)
+            pdf.schrift = "Text"
+            break
+    else:
+        pdf.schrift = "Helvetica"
+    pdf.add_page()
+    return pdf
+
+
+def _zeichen(pdf, text):
+    """Helvetica kennt nur Latin-1: typografische Zeichen ersetzen statt abbrechen."""
+    if pdf.schrift != "Helvetica":
+        return text
+    for alt, neu in {"–": "-", "—": "-", "“": '"', "”": '"', "„": '"', "‘": "'",
+                     "’": "'", "•": "-", "…": "...", "€": "EUR"}.items():
+        text = text.replace(alt, neu)
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def _markdown(text):
+    """fpdf versteht nur **fett**; __, -- und ~~ wuerden sonst als Kursiv,
+    Unterstrich oder Durchstrich gelesen."""
+    return re.sub(r"([-_~])(?=\1)", r"\1 ", text)
+
+
+def _absatz(pdf, text, groesse, fett=False, farbe=(0, 0, 0), breite=0, zeile=1.35):
+    pdf.set_font(pdf.schrift, "B" if fett else "", groesse)
+    pdf.set_text_color(*farbe)
+    pdf.multi_cell(breite, groesse * 0.3528 * zeile, _markdown(_zeichen(pdf, text)),
+                   markdown=True, align="L", new_x="LMARGIN", new_y="NEXT")
+
+
+def _speichern(pdf, ziel):
+    """Erst Zwischendatei, dann ersetzen: nie eine halb geschriebene PDF."""
+    tmp = Path(ziel).with_suffix(".tmp")
+    pdf.output(tmp)
+    os.replace(tmp, ziel)
+
+
+def lebenslauf_pdf(markdown, ziel, bild=None):
+    """bild: bytes des Fotos (jpg/png) oder None. Mit Foto stehen Name und
+    Berufstitel links, das Foto rechts daneben."""
+    pdf = _pdf()
     zeilen = [z.rstrip() for z in markdown.splitlines() if z.strip()]
-    if bild and not (zeilen and zeilen[0].startswith("# ")):
-        # Ohne Namenszeile: Foto trotzdem oben rechts.
-        absatz = doc.add_paragraph()
-        absatz.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        absatz.add_run().add_picture(io.BytesIO(bild), width=Cm(3.5))
-    elif bild:
-        tabelle = doc.add_table(rows=1, cols=2)
-        links, rechts = tabelle.rows[0].cells
-        links.width, rechts.width = Cm(12.5), Cm(4)
-        r = links.paragraphs[0].add_run(zeilen[0][2:].strip())
-        r.bold, r.font.size = True, Pt(20)
-        zeilen = zeilen[1:]
-        if zeilen and not zeilen[0].startswith("#") and not re.match(r"^\s*[-•*] ", zeilen[0]):
-            _fett(links.add_paragraph(), zeilen[0])
+    if bild:
+        oben = pdf.get_y()
+        pdf.image(io.BytesIO(bild), x=pdf.w - pdf.r_margin - MM_BILD, y=oben, w=MM_BILD)
+        from PIL import Image                          # Bildhoehe selbst rechnen
+        with Image.open(io.BytesIO(bild)) as b:
+            bild_unten = oben + MM_BILD * b.height / b.width
+        links = pdf.epw - MM_BILD - 5
+        if zeilen and zeilen[0].startswith("# "):
+            _absatz(pdf, zeilen[0][2:].strip(), 20, fett=True, breite=links)
             zeilen = zeilen[1:]
-        absatz = rechts.paragraphs[0]
-        absatz.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        absatz.add_run().add_picture(io.BytesIO(bild), width=Cm(3.5))
+            if zeilen and not zeilen[0].startswith("#") and not re.match(r"^\s*[-•*] ", zeilen[0]):
+                _absatz(pdf, zeilen[0], 10.5, breite=links)
+                zeilen = zeilen[1:]
+        pdf.set_y(max(pdf.get_y(), bild_unten) + 2)
     for z in zeilen:
         if z.startswith("# "):
-            r = doc.add_paragraph().add_run(z[2:].strip())
-            r.bold, r.font.size = True, Pt(20)
+            _absatz(pdf, z[2:].strip(), 20, fett=True)
         elif z.startswith("## "):
-            a = doc.add_paragraph()
-            a.paragraph_format.space_before = Pt(10)
-            r = a.add_run(z[3:].strip().upper())
-            r.bold, r.font.size = True, Pt(11)
-            r.font.color.rgb = RGBColor(0x1F, 0x4E, 0x8C)
+            pdf.ln(3)
+            _absatz(pdf, z[3:].strip().upper(), 11, fett=True, farbe=BLAU)
+            pdf.ln(1)
         elif re.match(r"^\s*[-•*] ", z):
-            _fett(doc.add_paragraph(style="List Bullet"), re.sub(r"^\s*[-•*] ", "", z))
+            pdf.set_font(pdf.schrift, "", 10.5)
+            if pdf.get_y() + 10.5 * 0.3528 * 1.35 > pdf.page_break_trigger:
+                pdf.add_page()                         # Punkt nie allein am Seitenende
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(5, 10.5 * 0.3528 * 1.35, _zeichen(pdf, "•"))
+            _absatz(pdf, re.sub(r"^\s*[-•*] ", "", z), 10.5, breite=pdf.epw - 5)
         else:
-            _fett(doc.add_paragraph(), z.lstrip("# "))
-    doc.save(ziel)
+            _absatz(pdf, z.lstrip("# "), 10.5)
+    _speichern(pdf, ziel)
 
 
-def anschreiben_docx(text, ziel):
-    doc = Document()
-    stil = doc.styles["Normal"]
-    stil.font.name, stil.font.size = "Calibri", Pt(11)
-    for block in re.split(r"\n\s*\n", text.strip()):
-        a = doc.add_paragraph()
-        zeilen = block.splitlines()
-        for i, z in enumerate(zeilen):
-            _fett(a, z.strip())
-            if i < len(zeilen) - 1:
-                a.add_run().add_break()
-    doc.save(ziel)
+def anschreiben_pdf(text, ziel):
+    """Immer genau eine Seite: ist der Text zu lang, wird die Schrift kleiner."""
+    bloecke = re.split(r"\n\s*\n", text.strip())
+    for groesse in (11, 10.5, 10, 9.5, 9, 8.5, 8):
+        pdf = _pdf()
+        for i, block in enumerate(bloecke):
+            if i:
+                pdf.ln(groesse * 0.3528 * 0.9)
+            _absatz(pdf, "\n".join(z.strip() for z in block.splitlines()), groesse)
+        if pdf.page_no() == 1:
+            break
+    else:
+        raise RuntimeError("Das Anschreiben ist zu lang für eine Seite. Bitte kürzen.")
+    _speichern(pdf, ziel)

@@ -38,9 +38,9 @@ CV_ORDNER = DATEN / "lebenslauf"   # genau EIN hochgeladener Lebenslauf
 # die per DNS-Rebinding oder CSRF auf den lokalen Server zugreifen wollen).
 EIGENE_HOSTS = (f"localhost:{PORT}", f"127.0.0.1:{PORT}")
 EIGENE_HERKUNFT = tuple(f"http://{h}" for h in EIGENE_HOSTS)
-# Je Dokument: Textdatei (zuletzt geschrieben = fertig) und Word-Datei.
-ARTEN = {"lebenslauf": ("lebenslauf.md", "Lebenslauf.docx"),
-         "anschreiben": ("anschreiben.txt", "Anschreiben.docx")}
+# Je Dokument: Textdatei (zuletzt geschrieben = fertig) und PDF-Datei.
+ARTEN = {"lebenslauf": ("lebenslauf.md", "Lebenslauf.pdf"),
+         "anschreiben": ("anschreiben.txt", "Anschreiben.pdf")}
 MAX_DOKUMENT = 30_000   # Zeichen, die man im Fenster bearbeiten kann
 
 zustand = {"laeuft": False, "meldung": "", "fehler": None}
@@ -462,17 +462,20 @@ def _inserat(o, stelle):
     return inserat
 
 
-def _word(art, text, o):
-    """Word-Datei schreiben; ein unbrauchbares Foto darf den Lebenslauf nie verhindern."""
-    worddatei = o / ARTEN[art][1]
+pdf_sperre = threading.Lock()   # Neuschreiben und Download nie gleichzeitig an einer PDF
+
+
+def _pdf(art, text, o):
+    """PDF schreiben; ein unbrauchbares Foto darf den Lebenslauf nie verhindern."""
+    pdfdatei = o / ARTEN[art][1]
     if art == "anschreiben":
-        return dokumente.anschreiben_docx(text, worddatei)
+        return dokumente.anschreiben_pdf(text, pdfdatei)
     foto = _foto(o)
     try:
-        dokumente.lebenslauf_docx(text, worddatei, foto.read_bytes() if foto else None)
+        dokumente.lebenslauf_pdf(text, pdfdatei, foto.read_bytes() if foto else None)
     except Exception as e:
-        print("Word mit Foto fehlgeschlagen:", repr(e))
-        dokumente.lebenslauf_docx(text, worddatei)
+        print("PDF mit Foto fehlgeschlagen:", repr(e))
+        dokumente.lebenslauf_pdf(text, pdfdatei)
 
 
 def dokument_erstellen(art, key, stelle, cv, cv_pfad, kennung, geaendert=None):
@@ -514,13 +517,14 @@ def dokument_erstellen(art, key, stelle, cv, cv_pfad, kennung, geaendert=None):
     try:
         if ergebnis is not None:
             o.mkdir(parents=True, exist_ok=True)
-            (o / ARTEN[art][1]).unlink(missing_ok=True)   # nie eine veraltete Word-Datei
-            try:
-                _word(art, ergebnis, o)
-            except Exception as e:
-                print("Word fehlgeschlagen:", repr(e))
-                fehler = "Die Word-Datei konnte nicht erstellt werden: " + str(e)
-            (o / textdatei).write_text(ergebnis, "utf-8")   # zuletzt: erst jetzt fertig
+            with pdf_sperre:
+                (o / ARTEN[art][1]).unlink(missing_ok=True)   # nie eine veraltete PDF-Datei
+                try:
+                    _pdf(art, ergebnis, o)
+                except Exception as e:
+                    print("PDF fehlgeschlagen:", repr(e))
+                    fehler = "Die PDF-Datei konnte nicht erstellt werden: " + str(e)
+                (o / textdatei).write_text(ergebnis, "utf-8")   # zuletzt: erst jetzt fertig
     except OSError as e:
         print("Speichern fehlgeschlagen:", repr(e))
         fehler, ergebnis = "Speichern fehlgeschlagen: " + str(e), ergebnis
@@ -598,13 +602,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._senden(200, foto.read_bytes(),
                                     "image/png" if foto.suffix == ".png" else "image/jpeg",
                                     {"Cache-Control": "no-store"})
-        m = re.fullmatch(r"/download/(.+)/(Lebenslauf|Anschreiben)\.docx", pfad)
+        m = re.fullmatch(r"/download/(.+)/(Lebenslauf|Anschreiben)\.pdf", pfad)
         if m and _stelle(unquote(m.group(1))):
-            datei = _ordner(unquote(m.group(1)), _aktueller_cv()[1]) / f"{m.group(2)}.docx"
-            if datei.exists():
-                return self._senden(200, datei.read_bytes(),
-                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                    {"Content-Disposition": f'attachment; filename="{m.group(2)}.docx"'})
+            o = _ordner(unquote(m.group(1)), _aktueller_cv()[1])
+            art = m.group(2).lower()
+            datei = o / ARTEN[art][1]
+            with pdf_sperre:
+                if not datei.exists() and (o / ARTEN[art][0]).exists():
+                    try:                  # aeltere Bewerbung: es gab nur Word
+                        _pdf(art, (o / ARTEN[art][0]).read_text("utf-8"), o)
+                    except Exception as e:
+                        print("PDF fehlgeschlagen:", repr(e))
+                        return self._senden(500, {"fehler": "Die PDF-Datei konnte nicht erstellt werden: " + str(e)})
+                inhalt = datei.read_bytes() if datei.exists() else None
+            if inhalt:
+                return self._senden(200, inhalt, "application/pdf",
+                                    {"Content-Disposition": f'attachment; filename="{m.group(2)}.pdf"'})
         self._senden(404, {"fehler": "nicht gefunden"})
 
     def do_POST(self):

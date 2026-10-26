@@ -307,7 +307,7 @@ async function panel(key, art, k, erstellen, fehlerText) {
   // fertig: direkt im Fenster bearbeitbar
   const speichern = el("button", null, "Änderungen speichern"); speichern.disabled = true;
   const neu = el("button", null, "Neu schreiben lassen");
-  const dl = el("a", "knopf", "Word herunterladen"); dl.href = `/download/${encodeURIComponent(key)}/${name}.docx`;
+  const dl = el("a", "knopf", "PDF herunterladen"); dl.href = `/download/${encodeURIComponent(key)}/${name}.pdf`;
   kn.append(speichern, neu, dl);
   if (e.fehler) zeigeFehler(k, art, e.fehler);
   const inhalt = el("div", "inhalt");

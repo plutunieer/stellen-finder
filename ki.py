@@ -195,7 +195,8 @@ Antworte NUR mit dem Lebenslauf, ohne Einleitung.
 def anschreiben(cv, stelle, inserat, datum):
     prompt = f"""Schreibe ein Anschreiben für diese Stelle.
 {REGELN}
-- Max. 1 Seite, konkret auf Inserat und Firma bezogen, keine Floskeln.
+- Muss auf 1 A4-Seite passen: Brieftext (ohne Kopf) höchstens 250 Wörter.
+  Konkret auf Inserat und Firma bezogen, keine Floskeln.
 - Kopf: Name und Kontakt aus dem Lebenslauf, dann Firma, dann Ort/Datum ({datum}),
   Betreff, Anrede (Ansprechperson aus dem Inserat, falls genannt), Text, Gruss, Name.
 Antworte NUR mit dem Anschreiben als einfachem Text, ohne Einleitung.
@@ -214,7 +215,8 @@ def ueberarbeiten(art, cv, stelle, inserat, vorher, nachher, datum):
     """Die Person hat das Dokument im Fenster geaendert. Ihre Aenderungen gelten
     (auch neue Angaben); Claude baut sie sauber ein und glaettet den Rest."""
     name = "Lebenslauf" if art == "lebenslauf" else "Anschreiben"
-    format_ = FORMAT_LEBENSLAUF if art == "lebenslauf" else "Format: einfacher Text."
+    format_ = (FORMAT_LEBENSLAUF if art == "lebenslauf" else
+               "Format: einfacher Text. Muss auf 1 A4-Seite passen: Brieftext höchstens 250 Wörter.")
     prompt = f"""Die Person hat ihren {name} für diese Stelle selbst geändert oder ergänzt.
 Überarbeite den {name} auf Grundlage ihrer Fassung:
 - Ihre Änderungen und neuen Angaben sind verbindlich und gelten als wahr. Übernimm
